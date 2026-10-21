@@ -23,17 +23,23 @@ other. The rules are cheap; follow them.
 ## Live state (as of this commit)
 
 - Running gateway: port 8790, pool `B,C`, A disabled, upstream real.
+- Extension auto-updated under us: **2.1.306** is current (2.1.301/305/306 all installed). Probe the
+  bundled `resources/native-binary/claude.exe` of 306 from now on.
 - Credential mode: **supported** — `ANTHROPIC_AUTH_TOKEN` is deliberately absent; the local secret
   travels in the `x-gw-secret` header, so the client authenticates to us with its saved claude.ai
   login and stays a subscription session. Managed by `cla-gw activate`, verified by `cla-gw doctor`.
   `~/.claude/settings.json` carries the env block (backup: `settings.json.claude-gw.bak`), which is
   why **Developer: Reload Window** is enough — a full VS Code quit is not required.
 - Live config knobs (`%LOCALAPPDATA%\claude-gw\config.json`, hot-reloaded per request):
-  - `holdMaxMs: 240000` — silent hold when the pool reopens within 4 min (proven, panel-tolerated).
-  - **`holdStream: false`** — the *long* hold (commit the SSE stream + ping keepalive) is coded and
-    unit-proven but **not yet client-proven**. Flip to `true` only after the panel test passes, and
-    say so here.
-  - `holdStreamMaxMs: 21600000` (6 h) — ceiling on any hold; beyond it the refusal passes through.
+  - **`holdStream: true` — ENABLED LIVE 19:55.** The long hold (commit the SSE stream + ping every 20 s,
+    then splice the real frames in) is now proven against the extension's own 2.1.306 binary at 240 s
+    and 700 s. This is the only mechanism that gets a panel chat past a limit, since the panel never
+    arms Claude Code's own wait.
+  - `holdMaxMs: 15000` — raised from 240000 to a **small** silent hold. Now that the ping path exists
+    and is proven, a minutes-long *silent* hold is the strictly riskier way to buy the same wait.
+  - `holdStreamMaxMs: 19800000` (**5.5 h**, was 6 h) — a 5 h window can be hours out, so park for it;
+    anything further out means the blocker is a **weekly** window, and a chat must not be parked for
+    days. Beyond the ceiling the real 429 passes through, as before.
   - `secretHeader: x-gw-secret`, `swapInferenceOnly: true`.
 
 ## What is proven vs assumed
@@ -41,9 +47,12 @@ other. The rules are cheap; follow them.
 | Claim | Status |
 |---|---|
 | Interactive (terminal TUI) chats arm and resume themselves at the reset | **proven on real accounts**: 429 at 11:24 → served by B at 14:21:01, 61 s after the reset, nobody typing |
-| Extension panel does NOT arm (it drives `claude.exe` headless → `rate_limit_event` then `result`) | **proven** on 2.1.305, both by behaviour and by the headless run against the stand-in |
-| Panel tolerates a held request | **proven at ~100 s**: hold 99 s → 200, no client abort |
-| Panel tolerates a *long* held request kept alive by ping frames | **UNPROVEN** — this is the next test (`probe_hold.mjs --long`) |
+| Extension panel does NOT arm (drives `claude.exe` headless → `rate_limit_event` then `result`) | **proven on 2.1.305 and re-proven on 2.1.306** (resident stream-json session: 429 at 19:13:50, then 7 min idle, one request total) |
+| Panel tolerates a held request (silent) | **proven at ~100 s**: hold 99 s → 200, no client abort; now capped at 15 s anyway, since the ping path below is better |
+| Panel tolerates a *long* held request kept alive by ping frames | **PROVEN 19:55 on 2.1.306** via `probe_long_hold.mjs`: held 236 926 ms and 695 421 ms, no abort, answer delivered on the same stream as a normal turn (`result is_error=false`) |
+| A hold survives past the client's own `x-stainless-timeout: 600` | **proven at 695 s** — that timeout is time-to-first-*response*, not time-to-first-token: once the gateway has committed 200 + a ping, the client keeps waiting. Do NOT read 600 s as the hold ceiling. |
+| The held panel chat still shows a limit notice | observed: the committed stream carries the refusal's (pool-corrected) quota headers, so the client emits `rate_limit_event` **and** completes the turn. Honest countdown, no dead turn. Keep an eye on it — if a future build lets that event end the turn, the hold breaks. |
+| A hold survives **hours**, VS Code closed, or a laptop sleeping through the reset | **UNPROVEN / presumed lost** — the ceiling allows 5.5 h but we have only measured 12 min, and a closed window or a sleep kills the socket (`hold-stream-abort`). Nothing gateway-side recovers those. |
 | Quota shim: the client is told when the **pool** reopens, not the refusing account | **proven live**: C refused with its own 16:00 window, client was handed B's 14:20 |
 | Shim never lengthens a wait | proven by tests |
 
@@ -59,21 +68,108 @@ node src/probe_hold.mjs selftest --window 40      # prove the silent hold path e
 node src/probe_hold.mjs run --window 180 --long   # LONG-hold tolerance test (touches live upstream!)
 node src/probe_hold.mjs restore                   # undo it, always
 node src/watch_autoresume.mjs --reset <epochSec>  # record which waiting chats got served after a reset
+node src/probe_long_hold.mjs --selftest          # 20s, plumbing only, no live anything
+node src/probe_long_hold.mjs --window 240        # the REAL panel binary, throwaway gateway, zero quota
+node src/probe_long_hold.mjs --window 700        # real scale; nothing live is touched, ~13 min
 ```
 
 ## Open work
 
-1. **Long-hold tolerance in the extension panel** — `probe_hold.mjs --long` at 180 s, then at ~15 min.
-   If it survives, set `holdStream: true` live (and consider raising the ceiling to 6 h) so panel
-   chats also ride out a multi-hour window. If the client errors on pings-before-first-token, say so
-   here and we keep panel chats refusing fast instead.
+1. **Long hold: shipped 19:55.** What is left is the tail nobody has measured — a hold of *hours*
+   (`--window 3000`+), and whether the panel behaves when the window is behind a sleep. Test it against
+   a real limit night rather than scheduling it: `probe_long_hold.mjs` is zero-quota, so a long one is
+   cheap, but it is only meaningful if a real chat is also parked that night.
 2. Surface the countdown in the VS Code status-bar extension (`vscode/`) during a hold — the gateway
-   already sends `x-gw-held: <ms>`.
+   already sends `x-gw-held: <ms>`, and a chat parked for an hour with no visible reason is exactly
+   what the status bar should be explaining.
 3. C's token was pasted into a chat once; rotation was offered and declined for now. Re-raise if the
    account is ever shared or the machine is.
+
+## ANNOUNCEMENTS
+
+- 18:40 — running the **panel/headless auto-resume question** as a free probe: stand-in upstream on
+  :8791 armed `limited` (resets ~5 min out) + the extension's own bundled `claude.exe` driven
+  `-p` **directly at the stand-in** (variant B env, no `ANTHROPIC_AUTH_TOKEN`). **Live gateway and
+  live `upstream` are NOT touched** — this is not a hijack of other chats; only the one spawned
+  process talks to :8791. No gateway restart. Watch `.probe/requests.jsonl`.
+- Reason for re-testing at all: two findings while setting this up.
+  1. `.probe/autoresume-watch.log`'s last line ("did NOT self-initiate") is **not** a panel failure —
+     it is just that watch's `--for 1200` deadline expiring at 14:46. The watcher never recorded a
+     `RESUMED` line for the 14:21:01 resume (the gateway log did: `d3beb324` 429 at 11:24 → 200 at
+     14:21:01). The watcher's verdict line is misleading; read the gateway log, not that line.
+  2. The extension auto-updated to **2.1.306** (2.1.301/305/306 all present). Every "proven on
+     2.1.305" row above needs re-proving against 306.
+
+- 19:25 — probe finished, stand-in stopped, **live config never touched** (`upstream` still
+  `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
+  Verdict below; it changes what the panel can and cannot get.
+
+## VERDICT: does the extension panel arm the wait? No. Proven on 2.1.306.
+
+Drove the extension's **own bundled binary** (`.vscode/extensions/anthropic.claude-code-2.1.306-win32-x64/
+resources/native-binary/claude.exe`) against the stand-in, in the shape the panel uses:
+resident `--input-format stream-json --output-format stream-json`, real claude.ai login, no
+`ANTHROPIC_AUTH_TOKEN`, stand-in armed `limited` with a 240 s window.
+
+```
+7:13:50 PM  stand-in -> 429 rate_limit_error (resets 7:17:49)
+            client emits: system/init, rate_limit_event, assistant, result(is_error=true,
+                          "You've hit your session limit · resets 7:16pm")
+            ...then the process stayed alive 7 more minutes and sent NOTHING. One request total.
+```
+Also tried with `"autoContinueAtUsageLimit": true` set explicitly (single-shot `-p`): identical,
+exit 1 in 2 s. So the wait/continue state machine is **not reachable from the headless/agent-sdk path
+the panel drives** — this is not a setting we can turn on, it is an interactive-UI-only feature.
+
+What the binary itself says (2.1.306, `strings` on the 295 MB exe — for the gateway's own shim rules):
+- `autoContinueAtUsageLimit` IS a documented user setting
+  (`claude-code-settings.schema.json:4866`): *"wait for the limit to reset and continue the task
+  automatically. When off, the limit dialog offers the wait as a choice instead."*
+- the arm gate: subscription auth AND `billingType !== "usage_based"` AND a quota object with
+  `status === "rejected"` and a finite `resetsAt` AND `isUsingOverage !== true` AND `overageInUse !== true`
+  AND a killswitch/feature flag AND the setting not explicitly off. **Our quota shim must keep
+  `status: rejected` + a finite reset and must never make the state look like overage-in-use** —
+  that alone can silently un-arm a terminal chat. Current shim only rewrites epochs, so we are fine.
+- its own constants: `30000, 90000, 1800000, 21600000` — i.e. a **6 h ceiling** on its own wait,
+  same number `holdStreamMaxMs` already uses. State machine has `sleptThroughReset`, `takeoverUuids`,
+  `pendingContinuationUuid`, `episodeArmOrigin: "dialog" | "auto"` — the `"dialog"` origin is the
+  interactive-only path we just watched refuse to exist headless.
+
+**Consequence for the user's stated preference** ("I prefer an error, but it must restart itself"):
+- terminal chats: already exactly that — honest limit message, self-continues at the reset
+  (gateway log: `d3beb324` 429 11:24 -> 200 **14:21:01** with nobody typing).
+- panel chats: an error ends the turn and nothing in the client can restart it. Error-then-self-restart
+  is **not obtainable** in the panel. The two real choices are (a) keep the request open so the panel
+  never sees the 429 (`holdStream`, unproven at scale, looks like "thinking"), or (b) an external
+  driver that re-runs the same session at the reset (`claude -p --resume <sessionId>` — the gateway
+  already logs the sessionId on every 429) and lands the answer in the same transcript. (b) is
+  unverified: does the panel re-render a transcript appended by another process? Test that next.
+
+## GOTCHA that cost real quota during this probe — read before writing another probe
+
+`~/.claude/settings.json` has an `env` block (`ANTHROPIC_BASE_URL=http://127.0.0.1:8790`), and **the
+settings `env` block overrides the process environment**. A probe that repoints at the stand-in by
+setting `ANTHROPIC_BASE_URL` in the shell silently talks to the LIVE gateway instead: my first two
+headless runs went to B for real (gateway log 7:12:09, 7:12:20 PM, two tiny completions) while the
+stand-in log looked "quiet". The fix is a settings layer:
+`--settings .probe/probe-settings.json` (env -> :8791, no secret header). Confirm the request shows up
+in `.probe/requests.jsonl` with `ua=claude-cli/...` **before** trusting any probe result. The
+`probe_limit.mjs launch` launchers only reach the stand-in if nothing in settings overrides them —
+same trap applies to them.
+
+- 19:40 — CLAIMING `src/probe_upstream.mjs` (log the `x-stainless-timeout` value: it is the ceiling on
+  how long ANY hold can be, and we have never read it) and NEW `src/probe_long_hold.mjs`.
+  **The target is the VS Code panel, not terminal Claude Code** — the harness drives the extension's own
+  bundled `claude.exe` (2.1.306) resident `--input-format/--output-format stream-json`, i.e. the exact
+  agent-sdk shape the panel drives. It does **NOT** repoint the live gateway: a **throwaway gateway**
+  (:8795, scratch `LOCALAPPDATA=.probe/gw-scratch`, fake vault tokens, upstream = stand-in :8791) means
+  every live chat on the machine — including the pi session, which itself routes through :8790 — keeps
+  working untouched. Zero quota, no restart, restore on exit/watchdog.
 
 ## CLAIMS
 
 | file | who | since | status |
 |---|---|---|---|
 | `src/gw.mjs`, `src/config.mjs`, `src/probe_hold.mjs`, `src/test_quota_surface.mjs` | pi session (this board's author) | 18:05 | released — committed |
+| `HANDOFF.md` (probe write-up), `.probe/probe-settings.json` | pi session | 18:40 | released — probe over, stand-in stopped, live config untouched |
+| `src/probe_upstream.mjs`, `src/probe_long_hold.mjs` | pi session | 19:40 | released — committed; harness is zero-quota and never touches live config |

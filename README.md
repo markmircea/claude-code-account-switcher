@@ -170,11 +170,48 @@ second account exists:
 - **bounded hold** (`holdMaxMs`, default 45s) — if the pool refuses but reopens within seconds (last
   night: C filled 1:02, B 1:03), the request is held and then served instead of handing over a limit
   message that would start a wait we could have skipped. A reset further out than the ceiling fails
-  fast, exactly as before; a chat is never held open for hours.
+  fast, exactly as before; a chat is never held open for hours. Kept deliberately short now that the
+  **long hold** below exists: a minutes-long *silent* hold is the riskier way to buy the same wait.
 - `probe_upstream.mjs` / `probe_limit.mjs` stand in for api.anthropic.com and answer whatever
   credential arrives, so this whole flow can be rehearsed in six minutes for **zero** quota and with
   nothing live touched. Re-run it after any Claude Code update — this is the feature most likely to be
   silently regressed by an update or by someone re-adding `ANTHROPIC_AUTH_TOKEN`.
+
+### The VS Code extension panel does not get that feature — the long hold is its substitute
+
+The panel drives its own bundled `claude.exe` headless (`--input-format/--output-format stream-json`).
+In that shape a usage limit produces `rate_limit_event` then a `result`, and the process then sits
+there: **it never arms the wait above.** Proven on 2.1.305 and again on 2.1.306 (7 minutes idle after
+the refusal, one request total), and it is not a setting — `autoContinueAtUsageLimit` exists in the
+settings schema and being `true` changes nothing on the headless path. So for a panel chat the only way
+to survive a limit is to never let the refusal reach the client:
+
+- **long hold** (`holdStream`, on by default, live since 21 Oct) — if the pool refuses but reopens
+  within `holdStreamMaxMs`, the gateway commits the stream (200 + SSE), sends a `ping` immediately and
+  every 20 s, then splices the real upstream frames into that same stream when the window opens. The
+  turn never ends and nobody re-types. The refusal's quota headers ride along, pool-corrected, so the
+  client still shows an honest countdown: `rate_limit_event` appears *and* the turn completes.
+  Proven against the extension's own 2.1.306 binary at **236 926 ms** and **695 421 ms** held, no abort.
+- The client's `x-stainless-timeout: 600` is **not** a hold ceiling — it is time-to-first-*response*, and
+  a committed 200 + ping satisfies it. A 695 s hold sailed past it.
+- The ceiling is deliberately **5.5 h**, not "as long as possible": a 5 h window can legitimately be
+  hours out, but anything further means a *weekly* window is the blocker, and no chat should be parked
+  open for days. Past the ceiling the real 429 passes through and the panel shows the limit honestly.
+- What it cannot do: a panel chat you interrupted before the limit, a window you closed, or a laptop
+  that slept through the reset. There is no gateway-side way back into a closed panel transcript.
+
+```powershell
+node src/probe_long_hold.mjs --selftest        # 20 s: harness plumbing only
+node src/probe_long_hold.mjs --window 240      # the real panel binary, 4-minute hold
+node src/probe_long_hold.mjs --window 700      # real scale (~12 min), still zero quota
+```
+
+`probe_long_hold.mjs` drives the **extension's own** `claude.exe` against a **throwaway gateway** on its
+own port with its own scratch data dir, upstream pointed at the stand-in. The live gateway, its config,
+vault, log and every other chat on the machine are never opened. Note the trap it works around: the
+`env` block in `~/.claude/settings.json` **overrides the process environment**, so repointing a probe by
+setting `ANTHROPIC_BASE_URL` in the shell silently talks to the live gateway instead. Use
+`--settings <file>`, and confirm the request shows up in `.probe/requests.jsonl` before believing a result.
 
 ```powershell
 node src/probe_upstream.mjs start --detach      # stand-in on 127.0.0.1:8791

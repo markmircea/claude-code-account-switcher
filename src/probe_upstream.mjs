@@ -170,6 +170,13 @@ async function handle(req, res) {
     session: req.headers['x-claude-code-session-id'] || null,
     app: req.headers['x-app'] || null,
     ua: (req.headers['user-agent'] || '').slice(0, 60),
+    // The client's own per-request timeout and retry counter. These are the real ceiling on any
+    // gateway-side hold: a hold longer than x-stainless-timeout is a hold the client has already
+    // abandoned, and x-stainless-retry-count tells us whether a "retry" is the client's SDK or its
+    // usage-limit state machine.
+    timeoutHdr: req.headers['x-stainless-timeout'] || null,
+    retryCount: req.headers['x-stainless-retry-count'] || null,
+    runtime: req.headers['x-stainless-runtime-version'] || null,
     // Stage 2 of the probe moves the gateway's local secret here, so watch for it.
     customHeaderNames: Object.keys(req.headers).filter((k) => /^x-/.test(k)).join(','),
   };
