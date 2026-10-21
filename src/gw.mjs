@@ -13,7 +13,7 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState } from './config.mjs';
+import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, isInferencePath } from './config.mjs';
 import { notifySwitch } from './notify.mjs';
 import { resolveBearer, describeIdentity } from './creds.mjs';
 
@@ -167,6 +167,17 @@ function eq(a, b) {
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
 
+// Log WHICH KIND of credential the client presented, never the credential. This is how we can see
+// whether a session is in subscription mode (its own claude.ai login) or legacy gateway-key mode -
+// which is the difference between Claude Code offering to wait out a usage limit and not.
+function credKind(v) {
+  if (!v) return 'none';
+  const s = String(v).replace(/^Bearer\s+/i, '');
+  if (s.startsWith('sk-ant-oat')) return 'login:oauth-or-setup-token';
+  if (s.startsWith('sk-ant-api')) return 'login:api-key';
+  return `login:opaque(${s.length})`;
+}
+
 function logLine(rec) {
   // Never log tokens, secrets, or authorization values.
   try {
@@ -194,6 +205,40 @@ function allowedHost(h, port) {
   return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
 }
 
+// Non-inference traffic in supported mode: forward with the credential the client presented. The
+// vault tokens are inference-only, so letting them sign account/model/usage calls would either 403
+// or tell the client something about the wrong account. Our local secret header never travels.
+async function forwardClientCredential({ req, res, cfg, body, bearer, reqPath, sessionId, t0 }) {
+  const url = new URL(req.url, cfg.upstream).toString();
+  const secretHdr = (cfg.secretHeader || 'x-gw-secret').toLowerCase();
+  const headers = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    const lk = k.toLowerCase();
+    if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'authorization' || lk === 'accept-encoding' || lk === secretHdr) continue;
+    if (typeof v === 'string' || typeof v === 'number') headers[k] = v;
+  }
+  headers.authorization = `Bearer ${bearer}`;
+  let up;
+  try {
+    up = await fetch(url, { method: req.method || 'GET', headers, body: body.length ? body : undefined });
+  } catch (e) {
+    logLine({ ts: Date.now(), event: 'passthrough', path: reqPath, status: 502,
+      err: String(e?.cause?.code || e?.message || e).slice(0, 200), sessionId });
+    return errRes(res, 502, 'api_error', 'claude-gw could not reach the upstream for this request', 'passthrough-failed');
+  }
+  const out = { 'content-type': up.headers.get('content-type') || 'application/json' };
+  for (const [k, v] of up.headers) {
+    const lk = k.toLowerCase();
+    if (HOP_BY_HOP.has(lk) || DECODED_AWAY.has(lk)) continue;
+    out[k] = v;
+  }
+  logLine({ ts: Date.now(), event: 'passthrough', path: reqPath, method: req.method, status: up.status,
+    sessionId, ms: Date.now() - t0, account: null });
+  res.writeHead(up.status, out);
+  if (!up.body) { res.end(); return; }
+  Readable.fromWeb(up.body).pipe(res);
+}
+
 async function handle(req, res) {
   const t0 = Date.now();
   stats.requests++;
@@ -214,9 +259,19 @@ async function handle(req, res) {
 
   const cfg = loadConfig();
 
-  // Everything else (including status) requires the local shared secret.
-  const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ') || !eq(auth.slice(7), cfg.secret)) {
+  // Everything else (including status) requires the local shared secret. It may arrive in the
+  // credential slot (legacy mode) or, the supported mode, in a header - because the credential slot
+  // is now reserved for the client's own claude.ai login, which is what keeps Claude Code's
+  // usage-limit auto-resume switched on. Header wins when both are present.
+  const secretHeader = (cfg.secretHeader || 'x-gw-secret').toLowerCase();
+  const hdrSecret = req.headers[secretHeader];
+  const bearer = req.headers.authorization
+    ? String(req.headers.authorization).replace(/^Bearer\s+/i, '')
+    : (req.headers['x-api-key'] || '');
+  let authMode = null;
+  if (typeof hdrSecret === 'string' && hdrSecret && eq(hdrSecret, cfg.secret)) authMode = 'header';
+  else if (bearer && eq(bearer, cfg.secret)) authMode = 'bearer';
+  if (!authMode) {
     return errRes(res, 401, 'authentication_error', 'invalid local gateway secret', 'bad-secret');
   }
 
@@ -245,8 +300,17 @@ async function handle(req, res) {
   catch (e) { return errRes(res, 413, 'invalid_request_error', 'body too large', 'body-too-large'); }
 
   const url = new URL(req.url, cfg.upstream).toString();
+  const reqPath = new URL(req.url, 'http://127.0.0.1').pathname;
   const sessionId = req.headers['x-claude-code-session-id'] || null;
   const method = req.method || 'POST';
+
+  // Non-inference traffic keeps the credential the client presented. In supported mode that is the
+  // user's own claude.ai login; a 1-year inference-only vault token must never be spent on an
+  // account/usage/model endpoint, where it either 403s or reports the wrong account.
+  if (!isInferencePath(reqPath) && cfg.swapInferenceOnly !== false
+      && authMode === 'header' && bearer && !eq(bearer, cfg.secret)) {
+    return forwardClientCredential({ req, res, cfg, body, bearer, reqPath, sessionId, t0 });
+  }
 
   // ---- choose, forward, and fail over BEFORE a single byte reaches the client ----
   // Replaying is safe here and only here: a request rejected with 429/529 consumed nothing, and
@@ -256,53 +320,82 @@ async function handle(req, res) {
   const model = (() => { try { return JSON.parse(body.toString('utf8')).model; } catch { return null; } })();
   const maxAttempts = Math.max(1, pool(cfg).length);
   let sel = null, up = null, noAccountReason = null, credStale = false;
+  let heldMs = 0;
 
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    sel = pickAccount(cfg, accountState, tried, model);
-    if (!sel.account) { noAccountReason = sel.reason; break; }
+  // Two rounds at most: round 2 only happens if we deliberately held the request because the pool
+  // was about to free up anyway. Nothing is replayed once bytes have reached the client, and nothing
+  // has been streamed at this point, so replaying here is free.
+  for (let round = 0; round < 2; round++) {
+    tried.clear();
+    up = null;
+    noAccountReason = null;
 
-    const cred = resolveBearer(sel.account);
-    if (cred.err) {
-      // A missing credential is not a quota signal; spinning through the pool would not help.
-      return errRes(res, 503, 'authentication_error',
-        `claude-gw cannot read a credential for "${sel.account.label}": ${cred.err}`, cred.err);
-    }
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      sel = pickAccount(cfg, accountState, tried, model);
+      if (!sel.account) { noAccountReason = sel.reason; break; }
 
-    const headers = {};
-    for (const [k, v] of Object.entries(req.headers)) {
-      const lk = k.toLowerCase();
-      if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'authorization' || lk === 'accept-encoding') continue;
-      if (typeof v === 'string' || typeof v === 'number') headers[k] = v;
-    }
-    headers.authorization = `Bearer ${cred.token}`;
-    credStale = !!cred.meta?.stale;
+      const cred = resolveBearer(sel.account);
+      if (cred.err) {
+        // A missing credential is not a quota signal; spinning through the pool would not help.
+        return errRes(res, 503, 'authentication_error',
+          `claude-gw cannot read a credential for "${sel.account.label}": ${cred.err}`, cred.err);
+      }
 
-    let r;
-    try {
-      r = await fetch(url, { method, headers, body: body.length ? body : undefined });
-    } catch (e) {
-      logLine({ ts: Date.now(), account: sel.account.label, path: req.url, method, sessionId,
-        err: String(e?.cause?.code || e?.message || e).slice(0, 200), ms: Date.now() - t0 });
+      const headers = {};
+      for (const [k, v] of Object.entries(req.headers)) {
+        const lk = k.toLowerCase();
+        if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'authorization' || lk === 'accept-encoding') continue;
+        if (lk === (cfg.secretHeader || 'x-gw-secret').toLowerCase()) continue; // local-only
+        if (typeof v === 'string' || typeof v === 'number') headers[k] = v;
+      }
+      headers.authorization = `Bearer ${cred.token}`;
+      credStale = !!cred.meta?.stale;
+
+      let r;
+      try {
+        r = await fetch(url, { method, headers, body: body.length ? body : undefined });
+      } catch (e) {
+        logLine({ ts: Date.now(), account: sel.account.label, path: req.url, method, sessionId,
+          err: String(e?.cause?.code || e?.message || e).slice(0, 200), ms: Date.now() - t0 });
+        tried.add(sel.account.label);
+        continue; // transport failure: another account may still work; bounded by maxAttempts
+      }
+
+      observeQuota(sel.account, r.headers, r.status, model, sel.reason !== 'detour');
+      up = r;
+      // Only quota/overload responses are worth moving off. 4xx/5xx of any other kind are the client's
+      // or upstream's problem and get passed through untouched.
+      if (r.status !== 429 && r.status !== 529) break;
+
       tried.add(sel.account.label);
-      continue; // transport failure: another account may still work; bounded by maxAttempts
+      const next = pickAccount(cfg, accountState, new Set(tried), model);
+      if (!next.account) break;
+      const nextAvail = availability(accountState[next.account.label], Date.now());
+      if (nextAvail.blocked.length) break; // every alternative is restricted too - surface the real 429
+
+      logLine({ ts: Date.now(), event: 'failover-replay', from: sel.account.label, to: next.account.label,
+                upstreamStatus: r.status, claim: accountState[sel.account.label]?.claim || null,
+                blocked: nextAvail.blocked, sessionId });
+      if (next.reason !== 'detour') notifySwitch(sel.account.label, next.account.label, `upstream ${r.status}`);
     }
 
-    observeQuota(sel.account, r.headers, r.status, model, sel.reason !== 'detour');
-    up = r;
-    // Only quota/overload responses are worth moving off. 4xx/5xx of any other kind are the client's
-    // or upstream's problem and get passed through untouched.
-    if (r.status !== 429 && r.status !== 529) break;
+    // Bounded hold: the pool refused, but somebody reopens inside a few tens of seconds. Surfacing a
+    // limit message here would make the client start a wait that we could have skipped entirely.
+    const refused = up && (up.status === 429 || up.status === 529);
+    if (!refused || round > 0 || !(cfg.holdMaxMs > 0)) break;
+    const open = poolOpening(cfg, accountState, Date.now());
+    const waitMs = open ? open.readyAt - Date.now() : Infinity;
+    if (waitMs <= 0 || waitMs > cfg.holdMaxMs) break;
+    // Is the client still there? Note req.destroyed is NOT the test: the request stream is fully
+    // consumed by readBody, so it is routinely true by now even for a waiting client.
+    if (res.writableEnded || res.destroyed || !res.socket || res.socket.destroyed) break;
 
-    tried.add(sel.account.label);
-    const next = pickAccount(cfg, accountState, new Set(tried), model);
-    if (!next.account) break;
-    const nextAvail = availability(accountState[next.account.label], Date.now());
-    if (nextAvail.blocked.length) break; // every alternative is restricted too - surface the real 429
-
-    logLine({ ts: Date.now(), event: 'failover-replay', from: sel.account.label, to: next.account.label,
-              upstreamStatus: r.status, claim: accountState[sel.account.label]?.claim || null,
-              blocked: nextAvail.blocked, sessionId });
-    if (next.reason !== 'detour') notifySwitch(sel.account.label, next.account.label, `upstream ${r.status}`);
+    logLine({ ts: Date.now(), event: 'hold', account: sel.account?.label || null, waitMs,
+      via: open.label, sessionId, model });
+    try { up.body?.cancel(); } catch { /* refused body is not needed */ }
+    await new Promise((r) => setTimeout(r, Math.min(waitMs + 750, cfg.holdMaxMs + 1500)));
+    heldMs = waitMs;
+    reloadStateIfChanged();
   }
 
   if (!up) {
@@ -320,6 +413,27 @@ async function handle(req, res) {
     if (HOP_BY_HOP.has(lk) || DECODED_AWAY.has(lk)) continue;
     out[k] = v;
   }
+
+  // Make the limit we hand the client describe the POOL, not just the account that refused. A Claude
+  // Code session that hits a usage limit arms a timer for the reset epoch in these headers and then
+  // stops asking - so an epoch belonging to the later-reopening account costs real working time
+  // (last night: refused at 1:03, both windows clear at 3:10). Statuses, body, status code and error
+  // type stay exactly as upstream sent them; only the countdown moves, and only ever earlier.
+  let shim = null;
+  if (up.status === 429) {
+    shim = poolQuotaShim(cfg, accountState, sel.account.label, Date.now());
+    if (shim) {
+      for (const win of ['5h', '7d']) {
+        const stKey = `anthropic-ratelimit-unified-${win}-status`;
+        if (out[stKey] === 'rejected') out[`anthropic-ratelimit-unified-${win}-reset`] = String(shim.readyEpochSec);
+      }
+      if (out['anthropic-ratelimit-unified-status'] === 'rejected') {
+        out['anthropic-ratelimit-unified-reset'] = String(shim.readyEpochSec);
+      }
+      out['retry-after'] = String(shim.retryAfter);
+    }
+  }
+
   const ttfb = Date.now() - t0;
   res.writeHead(up.status, out);
 
@@ -345,6 +459,10 @@ async function handle(req, res) {
   };
   if (sel.warning) rec.warning = sel.warning;
   if (credStale) rec.warning = 'cli credential reported stale; CLI refreshes it (D-10)';
+  if (heldMs) rec.heldMs = heldMs;
+  if (shim) rec.quotaShim = { via: shim.via, readyEpochSec: shim.readyEpochSec,
+    refusedReadyAt: shim.refusedReadyAt };
+  rec.clientCred = credKind(req.headers.authorization);
 
   stats.byAccount[sel.account.label] = (stats.byAccount[sel.account.label] || 0) + 1;
   if (up.status >= 400) stats.errors++;

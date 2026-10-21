@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# probe scratch: fake-upstream control/log + throwaway launchers (never commit)
+.probe/

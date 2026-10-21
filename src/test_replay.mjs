@@ -87,9 +87,14 @@ try {
   // Clean slate: A must look healthy, otherwise selection would pick B up front and the 429 we are
   // trying to test would never happen.
   fs.rmSync(ACCOUNT_STATE_PATH, { force: true }); // a real reset: the gateway hot-reloads state now
+  // Pin the FIRST ENABLED account, not the literal 'A': A is out of rotation now, and pinning a
+  // disabled account makes selection fall through to the pool, which silently retargets every
+  // expectation below (that is what this test's failures were, not a routing bug).
   const c = loadConfig();
+  const [first, second] = c.accounts.filter((a) => a.enabled !== false).map((a) => a.label);
+  if (!second) { console.log('SKIP: this test needs two accounts in rotation'); process.exit(0); }
   c.upstream = 'http://127.0.0.1:8793';
-  c.active = 'A';
+  c.active = first;
   saveConfig(c);
   await new Promise((r) => setTimeout(r, 1100));
 
@@ -111,18 +116,18 @@ try {
   const newLog = fs.readFileSync(LOG_PATH, 'utf8').slice(logLenBefore);
   const events = newLog.trim().split(/\r?\n/).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
   const replay = events.find((e) => e.event === 'failover-replay');
-  ok('replay was logged with from/to', replay?.from === 'A' && replay?.to === 'B',
+  ok('replay was logged with from/to', replay?.from === first && replay?.to === second,
      replay ? `${replay.from} -> ${replay.to} because ${replay.upstreamStatus}` : 'no failover-replay entry');
   const served = events.filter((e) => e.account).pop();
-  ok('final account recorded as B', served?.account === 'B', `account=${served?.account} status=${served?.status}`);
+  ok('final account recorded as the backup', served?.account === second, `account=${served?.account} status=${served?.status}`);
   ok('replay recorded the reason (which window)', replay?.claim === 'seven_day', `claim=${replay?.claim}`);
 
   const st = JSON.parse(fs.readFileSync(ACCOUNT_STATE_PATH, 'utf8'));
-  ok('A parked until the epoch the headers stated', (st.A?.blockedUntil || 0) > Date.now() &&
-     Math.abs(st.A.blockedUntil - RESET_EPOCH * 1000) < 5000,
-     st.A?.blockedUntil ? new Date(st.A.blockedUntil).toLocaleString() : 'not parked');
-  ok('A parked for quota, not as a blip', st.A?.parkReason === 'quota', `parkReason=${st.A?.parkReason}`);
-  ok('B identified by org from the fake response', st.B?.org === '11111111-test-org-B', `org=${st.B?.org}`);
+  ok('the refusing account parked until the epoch the headers stated', (st[first]?.blockedUntil || 0) > Date.now() &&
+     Math.abs(st[first].blockedUntil - RESET_EPOCH * 1000) < 5000,
+     st[first]?.blockedUntil ? new Date(st[first].blockedUntil).toLocaleString() : 'not parked');
+  ok('it parked for quota, not as a blip', st[first]?.parkReason === 'quota', `parkReason=${st[first]?.parkReason}`);
+  ok('the backup account identified by org from the fake response', st[second]?.org === '11111111-test-org-B', `org=${st[second]?.org}`);
 } finally {
   clearTimeout(watchdog);
   // closeAllConnections first: server.close() alone waits for keep-alive sockets, and the gateway

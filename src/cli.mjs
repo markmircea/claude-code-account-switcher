@@ -28,7 +28,12 @@ function stateLine(s) {
     ? `  PARKED(${s.parkReason || '?'} until ${new Date(s.blockedUntil).toLocaleString()})` : '';
   const bare = s.bare429 ? `  headerless-429s=${s.bare429}` : '';
   const blind = (s.u5h == null && s.u7d == null) ? '  [quota state not seen from real traffic yet]' : '';
-  return `5h ${pct(s.u5h)}/${s.s5h || 'n/a'}  7d ${pct(s.u7d)}/${s.s7d || 'n/a'}  claim=${s.claim || '?'}  ` +
+  // Usage is only learned from responses, so a window that has reset since this account last served
+  // would otherwise keep showing its old 100%/rejected.
+  const win = (u, st, reset) => (reset && reset * 1000 <= Date.now()
+    ? `reset ${new Date(reset * 1000).toLocaleTimeString()}, not used since`
+    : `${pct(u)}/${st || 'n/a'}`);
+  return `5h ${win(s.u5h, s.s5h, s.r5h)}  7d ${win(s.u7d, s.s7d, s.r7d)}  claim=${s.claim || '?'}  ` +
          `7d resets ${when(s.r7d)}  reqs=${s.requests || 0}${parked}${bare}${blind}`;
 }
 
@@ -138,7 +143,7 @@ async function main() {
     }
 
     case 'activate': {
-      await activate({ noStartup: process.argv.includes('--no-startup') });
+      await activate({ noStartup: process.argv.includes('--no-startup'), legacy: process.argv.includes('--legacy') });
       return;
     }
 
@@ -265,22 +270,25 @@ Re-run with --yes if you really mean deletion.`);
     case 'env': {
       // The local shared secret, printed deliberately: it guards a loopback-only endpoint and is
       // not an Anthropic credential. It still should not end up committed or pasted into logs.
+      // NOTE the deliberate absence of ANTHROPIC_AUTH_TOKEN: setting it makes Claude Code treat the
+      // session as a billed-API session and switch off auto-continue at the usage limit.
       console.log('# PowerShell — sets the gateway for BOTH the CLI and the VS Code extension (D-6).');
       console.log('# Remove with: cla-gw clear-env  (then restart the shell / VS Code)');
       console.log(`$env:CLAUDE_CODE_USE_GATEWAY = "1"`);
       console.log(`$env:ANTHROPIC_BASE_URL      = "http://${cfg.host}:${cfg.port}"`);
-      console.log(`$env:ANTHROPIC_AUTH_TOKEN    = "${cfg.secret}"`);
+      console.log(`$env:ANTHROPIC_CUSTOM_HEADERS = "${(cfg.secretHeader || 'x-gw-secret')}: ${cfg.secret}"`);
+      console.log(`Remove-Item Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue   # must stay unset`);
       return;
     }
 
     case 'clear-env': {
       console.log('# PowerShell');
-      console.log('Remove-Item Env:CLAUDE_CODE_USE_GATEWAY,Env:ANTHROPIC_BASE_URL,Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue');
+      console.log('Remove-Item Env:CLAUDE_CODE_USE_GATEWAY,Env:ANTHROPIC_BASE_URL,Env:ANTHROPIC_CUSTOM_HEADERS,Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue');
       return;
     }
 
     default:
-      console.log('usage: cla-gw start | stop | status | health | doctor | activate | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
+      console.log('usage: cla-gw start | stop | status | health | doctor | activate [--legacy|--no-startup] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
       console.log('       use <label>|none | enable <label> | disable <label> | env | clear-env | statusline');
   }
 }

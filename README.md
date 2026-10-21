@@ -47,10 +47,33 @@ If the automated flow cannot drive `setup-token` non-interactively, print the ma
 ## Go live (and come back)
 
 ```powershell
-node src/cli.mjs activate      # sets the 3 vars at USER scope + starts the gateway + installs logon autostart
+node src/cli.mjs activate      # sets the vars at USER scope + starts the gateway + installs logon autostart
 node src/cli.mjs doctor        # first thing to run when anything looks broken
 node src/cli.mjs deactivate    # removes the vars, the startup entry, stops the gateway
+node src/cli.mjs activate --legacy   # old credential model (ANTHROPIC_AUTH_TOKEN) - works, no auto-resume
 ```
+
+**The credential slot is deliberately left empty.** `ANTHROPIC_AUTH_TOKEN` is what Claude Code calls a
+*gateway credential*, and while it is set the client treats the session as a billed-API session and
+**turns off its own "wait for the claude.ai usage limit to reset, then continue the task" feature**
+(docs: *"While a gateway credential variable or apiKeyHelper is active, the subscription's usage
+limits don't apply"*). So supported mode sets only:
+
+```powershell
+$env:ANTHROPIC_BASE_URL       = "http://127.0.0.1:8790"
+$env:ANTHROPIC_CUSTOM_HEADERS = "x-gw-secret: <local secret>"   # our shared secret, not a credential
+# ANTHROPIC_AUTH_TOKEN must be ABSENT - doctor fails if it is present
+```
+
+The client then authenticates **to us** with its saved claude.ai login (proved on 2.1.305: it sends
+its own OAuth bearer with `anthropic-beta: …,oauth-2025-04-20,…`), the session stays a subscription
+session, and claude-gw still re-signs `/v1/messages` with B or C. Consequences:
+
+- Only `/v1/messages*` is re-signed. `/v1/models` and anything account-shaped keeps the client's own
+  credential, because a `setup-token` is inference-only and 403s on those endpoints.
+- The login must exist and be readable: `activate` refuses without it, `doctor` checks it.
+- `/usage` now reports **that login's** windows, not the serving account's. The status bar and
+  `cla-gw health` remain the truth.
 
 User scope is deliberate (D-6): the VS Code extension spawns its **own bundled `claude.exe`**, so
 shell-only exports would cover the terminal and miss the extension. Three consequences, all real:
@@ -128,6 +151,39 @@ a vaulted `setup-token` gets `403 … user:profile` from the usage endpoint and 
 `cla-gw notify` fires a test notification. `cla-gw reset-state` clears quota state; the running
 gateway hot-reloads the file, so no restart is needed.
 
+## When both accounts run out: the chats resume themselves
+
+This is Claude Code's own feature, not a rescuer script we wrote. With the credential slot empty (see
+"Go live") a session that hits a usage limit shows
+`Usage limit reached · continuing automatically at 3:10am · esc to cancel`, waits, and at the reset
+**sends the continuation itself**. Proven end to end on 2.1.305 against a stand-in upstream: stopped at
+10:06:30, resumed itself at 10:07:28 (that ~60s is its own jitter) with nobody typing. `esc` cancels
+that chat's resume; a chat you interrupted before the limit stays where you left it.
+
+What the gateway adds is making the countdown describe **the pool**, because the client has no idea a
+second account exists:
+
+- **quota shim** — a waiting client arms a timer from the reset epoch in the 429's headers and stops
+  asking. If the refusing account reopens at 04:00 but its mate reopens at 03:10, we rewrite *only*
+  those reset epochs and `retry-after` to the earlier time. Statuses, body, status code and error type
+  stay exactly as upstream sent them, and the shim **never lengthens a wait**. Logged as `quotaShim`.
+- **bounded hold** (`holdMaxMs`, default 45s) — if the pool refuses but reopens within seconds (last
+  night: C filled 1:02, B 1:03), the request is held and then served instead of handing over a limit
+  message that would start a wait we could have skipped. A reset further out than the ceiling fails
+  fast, exactly as before; a chat is never held open for hours.
+- `probe_upstream.mjs` / `probe_limit.mjs` stand in for api.anthropic.com and answer whatever
+  credential arrives, so this whole flow can be rehearsed in six minutes for **zero** quota and with
+  nothing live touched. Re-run it after any Claude Code update — this is the feature most likely to be
+  silently regressed by an update or by someone re-adding `ANTHROPIC_AUTH_TOKEN`.
+
+```powershell
+node src/probe_upstream.mjs start --detach      # stand-in on 127.0.0.1:8791
+node src/probe_limit.mjs arm --reset-in 360     # "out of usage", heals in 6 minutes
+node src/probe_limit.mjs launch --variant B --vscode   # throwaway window, no quota, no live config
+node src/probe_upstream.mjs selftest            # prove the 429/200 shapes without a client
+node src/probe_upstream.mjs stop
+```
+
 ## Quota state and routing
 
 Every `/v1/messages` response — success or 429 — carries the account's live quota state in headers:
@@ -167,6 +223,8 @@ node src/test_selection.mjs # 35 checks: the rotation rules and 429 classificati
 node src/test_sticky.mjs    #  9 checks: sticky routing end to end, real gateway + fake upstream in a
                             #            throwaway data dir (free, touches nothing live, no toasts)
 node src/test_replay.mjs    # 10 checks: mid-request failover against a fake upstream (free, deterministic)
+node src/test_quota_surface.mjs # 22 checks: header auth, per-path re-signing, the quota shim, the
+                            #            bounded hold, and "never hold a reset that is hours away"
 node src/failover_test.mjs  # 11 checks: same against the REAL upstream (costs two tiny completions)
 ```
 
@@ -175,9 +233,10 @@ node src/failover_test.mjs  # 11 checks: same against the REAL upstream (costs t
 
 ## Guarantees and non-guarantees
 
-- Loopback-only bind, peer-address check, `Host` validation, timing-safe secret compare.
-- `Anthropic_AUTH_TOKEN` here is a **local** secret, not an Anthropic credential. Still: do not
-  commit it, do not paste it into logs or issues.
+- Loopback-only bind, peer-address check, `Host` validation, timing-safe secret compare. The local
+  secret travels in `x-gw-secret` (or, in legacy mode, the bearer) and is stripped before forwarding.
+- **`ANTHROPIC_AUTH_TOKEN` is a *local* secret, not an Anthropic credential.** Still: do not commit
+  it, do not paste it into logs or issues.
 - The gateway logs to `%LOCALAPPDATA%\claude-gw\gateway.jsonl`: paths, statuses, session ids,
   timings, byte counts. It never logs tokens, secrets, or `authorization` values.
 - **`disable` is not `revoke`.** There is no server-side revoke in Claude Code; a disabled

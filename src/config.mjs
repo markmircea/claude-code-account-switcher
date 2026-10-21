@@ -32,6 +32,22 @@ const DEFAULTS = () => ({
   port: 8790,
   upstream: 'https://api.anthropic.com',
   secret: crypto.randomBytes(24).toString('hex'),
+  // The local shared secret travels in a HEADER, not in the credential slot. That is deliberate:
+  // setting ANTHROPIC_AUTH_TOKEN (a "gateway credential") makes Claude Code treat the session as a
+  // billed API session, and it then turns OFF its own "wait for the claude.ai usage limit to reset,
+  // then continue the task" feature - the one thing that keeps overnight chats alive. With only
+  // ANTHROPIC_BASE_URL set, the client keeps using its saved claude.ai login against us (proved on
+  // 2.1.305: it sends its own OAuth bearer with anthropic-beta including oauth-2025-04-20) while
+  // this gateway re-signs /v1/messages with a pool account. `cla-gw activate` writes the header.
+  secretHeader: 'x-gw-secret',
+  // Only /v1/messages* gets re-signed. Everything else (model listing, account/usage calls a future
+  // version may add) keeps the client's own credential, so a 1-year inference-only vault token is
+  // never presented to an endpoint that expects the real login.
+  swapInferenceOnly: true,
+  // When every account is restricted but one frees up almost immediately (last night: C filled at
+  // 1:02, B at 1:03), hold the request instead of surfacing a limit message the client would then
+  // have to wait out. Bounded, once per request; 0 disables it.
+  holdMaxMs: 45000,
   // null => "pick the first enabled account". `cla-gw use <label>` sets this.
   active: null,
   accounts: [
@@ -60,6 +76,12 @@ function parse(raw) {
   if (!Array.isArray(cfg.accounts) || cfg.accounts.length === 0) {
     throw new Error('config.accounts must be a non-empty array');
   }
+  // Defaults for keys added after a config file already existed. Without this, an older config.json
+  // silently opts out of features it never heard of - which is exactly how the bounded hold ended up
+  // disabled on a live gateway that otherwise had every reason to use it.
+  if (cfg.secretHeader === undefined) cfg.secretHeader = 'x-gw-secret';
+  if (cfg.swapInferenceOnly === undefined) cfg.swapInferenceOnly = true;
+  if (cfg.holdMaxMs === undefined) cfg.holdMaxMs = 45000;
   for (const a of cfg.accounts) {
     if (!a.label || !a.kind) throw new Error('each account needs {label, kind}');
     if (a.enabled === undefined) a.enabled = true;
@@ -251,6 +273,44 @@ export function pickAccount(cfg, state = {}, exclude = new Set(), model = null) 
     out.warning = `every account is gated for ${model} right now; trying ${ranked[0].label} anyway`;
   }
   return out;
+}
+
+// Which account will be able to serve SOONEST, and when. The pool - not the account that just
+// refused. This is the number a waiting chat actually needs.
+export function poolOpening(cfg, state = {}, now = Date.now()) {
+  const enabled = pool(cfg);
+  if (!enabled.length) return null;
+  let best = null;
+  for (const a of enabled) {
+    const av = availability(state[a.label], now);
+    const readyAt = Math.max(av.readyAt, now); // unblocked => ready now
+    if (!best || readyAt < best.readyAt) best = { label: a.label, readyAt, blocked: av.blocked };
+  }
+  return best;
+}
+
+// Should the 429 we are about to hand the client describe the POOL rather than the refusing
+// account? Only ever to SHORTEN the wait, never to lengthen it.
+//
+// Why: a Claude Code session that hits a usage limit arms a timer for the reset epoch in that 429's
+// rate-limit headers (proven: the probe armed for exactly the epoch we sent) and then waits, without
+// asking again. It does not know a second account exists. If the account that refused reopens at
+// 04:00 but a mate reopens at 03:10, the honest-for-the-account answer is a lie for the user: the
+// chat sleeps 50 minutes past the point where we could have served it. Statuses stay untouched, so
+// it still reads as the same kind of limit; only the reset epochs and retry-after move.
+export function poolQuotaShim(cfg, state, refusingLabel, now = Date.now()) {
+  const refused = availability(state[refusingLabel], now);
+  if (!refused.blocked.length) return null;
+  const open = poolOpening(cfg, state, now);
+  if (!open || open.readyAt >= refused.readyAt - 1000) return null;
+  const readyEpochSec = Math.floor(open.readyAt / 1000);
+  const retryAfter = Math.max(1, Math.ceil((open.readyAt - now) / 1000));
+  return { readyEpochSec, retryAfter, via: open.label, refusedReadyAt: refused.readyAt };
+}
+
+// /v1/messages and its satellites are inference. Everything else is not, and must not be re-signed.
+export function isInferencePath(pathname) {
+  return pathname === '/v1/messages' || pathname.startsWith('/v1/messages/');
 }
 
 export function readAccountState() {

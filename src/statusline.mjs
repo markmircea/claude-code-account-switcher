@@ -53,7 +53,28 @@ async function main() {
   const pct = (v) => (v == null ? '?' : `${Math.round(v * 100)}%`);
   const a = st.accounts?.[serving];
   const usage = a ? ` 5h ${pct(a.u5h)} 7d ${pct(a.u7d)}` : '';
-  console.log(`gw→${mark}${serving}${usage} [${pool}]${disabled}`);
+  // When nobody in the pool can serve, the only number that matters is WHEN one can - that is the
+  // time a waiting chat will wake up on its own, so show it instead of a red mystery.
+  let opens = '';
+  const now = Date.now();
+  const readyAtOf = (label) => {
+    const s = st.accounts?.[label] || {};
+    let r = 0;
+    for (const [stKey, rKey] of [['s5h', 'r5h'], ['s7d', 'r7d']]) {
+      if (s[stKey] === 'rejected' && s[rKey] && s[rKey] * 1000 > now) r = Math.max(r, s[rKey] * 1000);
+    }
+    if (!r && s.blockedUntil > now) r = s.blockedUntil;
+    return r;
+  };
+  const poolLabels = st.pool || [];
+  if (poolLabels.length) {
+    const blocked = poolLabels.map(readyAtOf);
+    if (blocked.every((r) => r > now)) {
+      const i = blocked.indexOf(Math.min(...blocked));
+      opens = ` | all full, ${poolLabels[i]} opens ${new Date(blocked[i]).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    }
+  }
+  console.log(`gw→${mark}${serving}${usage} [${pool}]${disabled}${opens}`);
 }
 
 main().catch(() => console.log('gw: ?'));
