@@ -28,14 +28,25 @@ const cmd = process.argv[2] || 'run';
 
 const SNAP = path.join(HERE, '..', '.probe', 'hold-config.json');
 
-function snapshotAndPoint(windowSec) {
+function snapshotAndPoint(windowSec, long = false) {
   const cfg = loadConfig();
   if (!fs.existsSync(SNAP)) {
     fs.mkdirSync(path.dirname(SNAP), { recursive: true });
-    fs.writeFileSync(SNAP, JSON.stringify({ upstream: cfg.upstream, holdMaxMs: cfg.holdMaxMs }));
+    fs.writeFileSync(SNAP, JSON.stringify({ upstream: cfg.upstream, holdMaxMs: cfg.holdMaxMs,
+      holdStream: cfg.holdStream, holdStreamMaxMs: cfg.holdStreamMaxMs }));
   }
   cfg.upstream = FAKE;
-  cfg.holdMaxMs = windowSec * 1000 + 30_000; // hold the whole window, plus a margin
+  if (long) {
+    // Force the LONG path: a tiny silent-hold ceiling means the window can only be covered by
+    // committing the stream and keeping it alive with ping frames. This is the path an extension-panel
+    // chat depends on, and whether a real client tolerates ping-before-first-token is what we are here
+    // to find out.
+    cfg.holdMaxMs = 5000;
+    cfg.holdStream = true;
+    cfg.holdStreamMaxMs = windowSec * 1000 + 60_000;
+  } else {
+    cfg.holdMaxMs = windowSec * 1000 + 30_000; // hold the whole window, plus a margin
+  }
   saveConfig(cfg);
   return cfg;
 }
@@ -93,13 +104,14 @@ async function main() {
   if (cmd === 'restore') return restore();
 
   const windowSec = arg('window', 180);
+  const long = process.argv.includes('--long');
 
   if (cmd === 'selftest') {
     ensureFake();
     await new Promise((r) => setTimeout(r, 1200));
     const resetAt = armFake(windowSec).resetAt;
-    snapshotAndPoint(windowSec);
-    console.log(`stand-in says "out of usage" until ${new Date(resetAt * 1000).toLocaleTimeString()} (${windowSec}s)`);
+    snapshotAndPoint(windowSec, long);
+    console.log(`${long ? 'LONG hold (ping-keepalive stream)' : 'silent hold'}: stand-in says "out of usage" until ${new Date(resetAt * 1000).toLocaleTimeString()} (${windowSec}s)`);
     console.log('expected: the gateway holds the request and then serves it, no error to the client\n');
     let fail = 0;
     try {

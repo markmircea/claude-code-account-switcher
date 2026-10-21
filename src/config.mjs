@@ -82,6 +82,12 @@ function parse(raw) {
   if (cfg.secretHeader === undefined) cfg.secretHeader = 'x-gw-secret';
   if (cfg.swapInferenceOnly === undefined) cfg.swapInferenceOnly = true;
   if (cfg.holdMaxMs === undefined) cfg.holdMaxMs = 45000;
+  // Long holds: when the pool reopens in MINUTES or HOURS rather than seconds, a silent hold cannot
+  // work (the client gives up on a connection with no bytes after roughly five minutes). For
+  // streaming requests we can still recover: commit the stream, keep it alive with ping frames, and
+  // forward for real when the window opens. Cap it so a chat is never parked past a plausible reset.
+  if (cfg.holdStream === undefined) cfg.holdStream = true;
+  if (cfg.holdStreamMaxMs === undefined) cfg.holdStreamMaxMs = 6 * 3600_000;
   for (const a of cfg.accounts) {
     if (!a.label || !a.kind) throw new Error('each account needs {label, kind}');
     if (a.enabled === undefined) a.enabled = true;
@@ -306,6 +312,22 @@ export function poolQuotaShim(cfg, state, refusingLabel, now = Date.now()) {
   const readyEpochSec = Math.floor(open.readyAt / 1000);
   const retryAfter = Math.max(1, Math.ceil((open.readyAt - now) / 1000));
   return { readyEpochSec, retryAfter, via: open.label, refusedReadyAt: refused.readyAt };
+}
+
+// Apply a shim to a header object about to be sent to the client. Statuses stay exactly as upstream
+// sent them (it is still a real limit); only the countdown moves, and only ever to the earlier time.
+export function applyQuotaShim(out, shim) {
+  if (!shim) return out;
+  for (const win of ['5h', '7d']) {
+    if (out[`anthropic-ratelimit-unified-${win}-status`] === 'rejected') {
+      out[`anthropic-ratelimit-unified-${win}-reset`] = String(shim.readyEpochSec);
+    }
+  }
+  if (out['anthropic-ratelimit-unified-status'] === 'rejected') {
+    out['anthropic-ratelimit-unified-reset'] = String(shim.readyEpochSec);
+  }
+  out['retry-after'] = String(shim.retryAfter);
+  return out;
 }
 
 // /v1/messages and its satellites are inference. Everything else is not, and must not be re-signed.

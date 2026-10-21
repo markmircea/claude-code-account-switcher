@@ -57,12 +57,15 @@ function fakeUpstream() {
   });
 }
 
-function writeFixture(state) {
+function writeFixture(state, opts = {}) {
+  const { holdMaxMs = 4000, holdStreamMaxMs, holdStream } = opts;
   fs.rmSync(TEST_DATA, { recursive: true, force: true });
   fs.mkdirSync(UPSTREAM_DIR, { recursive: true });
   fs.writeFileSync(path.join(UPSTREAM_DIR, 'config.json'), JSON.stringify({
     host: '127.0.0.1', port: GW_PORT, upstream: `http://127.0.0.1:${FAKE_PORT}`,
-    secret: SECRET, secretHeader: 'x-gw-secret', swapInferenceOnly: true, holdMaxMs: 4000,
+    secret: SECRET, secretHeader: 'x-gw-secret', swapInferenceOnly: true, holdMaxMs,
+    ...(holdStreamMaxMs !== undefined ? { holdStreamMaxMs } : {}),
+    ...(holdStream !== undefined ? { holdStream } : {}),
     active: null,
     // cli-credential is the one kind resolvable without copying the vault; the fake upstream never
     // checks what it is given.
@@ -170,7 +173,7 @@ async function main() {
       },
       body: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limit exceeded' } }),
     }, { status: 200, headers: { 'anthropic-ratelimit-unified-status': 'allowed' } }];
-    r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', stream: true, messages: [] } });
+    r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', stream: false, messages: [] } });
     const told5h = Number(r.headers.get('anthropic-ratelimit-unified-5h-reset'));
     const toldRetry = Number(r.headers.get('retry-after'));
     ok(r.status === 429, 'both-restricted still surfaces a real 429 (never a silent hang)', `HTTP ${r.status}`);
@@ -206,11 +209,11 @@ async function main() {
     ok(waited > 1000, 'it waited for the window instead of replaying instantly', `${waited}ms`);
     ok(readLog().some((l) => l.event === 'hold'), 'the hold is recorded', `waited ${waited}ms`);
 
-    // 5. an unwaitably-far reset must NOT be turned into a hold (never stall a chat for hours)
+    // 5. a reset further out than the hold ceiling must NOT be parked forever (cap the wait)
     writeFixture({
       B: { s5h: 'rejected', r5h: nowSec() + 7200, unifiedStatus: 'rejected', reset: nowSec() + 7200 },
       C: { s5h: 'rejected', r5h: nowSec() + 7200, unifiedStatus: 'rejected', reset: nowSec() + 7200 },
-    });
+    }, { holdMaxMs: 1000, holdStreamMaxMs: 60000 }); // ceiling 1 minute, window is 2 hours away
     await sleep(1600);
     script = [{ status: 429, headers: { 'anthropic-ratelimit-unified-status': 'rejected',
       'anthropic-ratelimit-unified-5h-status': 'rejected',
@@ -219,8 +222,63 @@ async function main() {
       { status: 200 }];
     const t1 = Date.now();
     r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', stream: true, messages: [] } });
-    ok(r.status === 429 && Date.now() - t1 < 3000, 'a 2h-away reset fails fast, it is not held open',
+    ok(r.status === 429 && Date.now() - t1 < 3000, 'a reset past the ceiling is refused fast, never parked',
       `HTTP ${r.status} in ${Date.now() - t1}ms`);
+    ok(!readLog().some((l) => l.event === 'hold-stream' && l.waitMs > 60000),
+       'the ceiling is respected - no hold longer than holdStreamMaxMs');
+    // 6. LONG hold: the pool reopens in ~4s - too far for the bounded hold, so the gateway commits
+    //    the stream, keeps it alive with ping frames, and forwards when the window opens. This is
+    //    what an extension-panel chat (which never arms Claude Code's own wait) depends on.
+    writeFixture({
+      B: { s5h: 'rejected', r5h: nowSec() + 4, unifiedStatus: 'rejected', reset: nowSec() + 4 },
+      C: { s5h: 'rejected', r5h: nowSec() + 4, unifiedStatus: 'rejected', reset: nowSec() + 4 },
+    }, { holdMaxMs: 1000 }); // bounded hold cannot cover 4s, so the long path must
+    await sleep(900);
+    script = [{ status: 429, headers: { 'anthropic-ratelimit-unified-status': 'rejected',
+      'anthropic-ratelimit-unified-5h-status': 'rejected',
+      'anthropic-ratelimit-unified-5h-reset': String(nowSec() + 4),
+      'retry-after': '4' },
+      body: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limit exceeded' } }) },
+      { status: 200, headers: { 'anthropic-ratelimit-unified-status': 'allowed' } }];
+    const t2 = Date.now();
+    const rr = await fetch(`http://127.0.0.1:${GW_PORT}/v1/messages?beta=true`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-gw-secret': SECRET,
+        authorization: 'Bearer client-own-login' },
+      body: JSON.stringify({ model: 'claude-opus-5-5', stream: true, messages: [] }),
+    });
+    const frames = [];
+    const reader = rr.body.getReader();
+    const dec = new TextDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const s = dec.decode(value, { stream: true });
+      for (const m of s.matchAll(/event: ([a-z_]+)/g)) frames.push({ ev: m[1], at: Date.now() - t2 });
+    }
+    const kinds = frames.map((f) => f.ev);
+    ok(rr.status === 200, 'long hold: the client is never handed a 429', `HTTP ${rr.status}`);
+    ok(rr.headers.get('x-gw-held') !== null, 'long hold announces itself', `x-gw-held=${rr.headers.get('x-gw-held')}ms`);
+    ok(kinds[0] === 'ping', 'the stream stays alive with pings while it waits', kinds.slice(0, 3).join(','));
+    ok(kinds.includes('message_start') && kinds.includes('message_stop'),
+       'the real answer arrives on the same stream', kinds.join(','));
+    const t3 = Date.now() - t2;
+    ok(t3 > 3000, 'it waited for the window rather than answering instantly', `${t3}ms`);
+    ok(readLog().some((l) => l.event === 'hold-stream'), 'the long hold is recorded');
+    // 7. holdStream:false restores the old behaviour - refuse immediately, let the client decide
+    writeFixture({
+      B: { s5h: 'rejected', r5h: nowSec() + 4, unifiedStatus: 'rejected', reset: nowSec() + 4 },
+      C: { s5h: 'rejected', r5h: nowSec() + 4, unifiedStatus: 'rejected', reset: nowSec() + 4 },
+    }, { holdMaxMs: 1000, holdStream: false });
+    await sleep(900);
+    script = [{ status: 429, headers: { 'anthropic-ratelimit-unified-status': 'rejected',
+      'anthropic-ratelimit-unified-5h-status': 'rejected',
+      'anthropic-ratelimit-unified-5h-reset': String(nowSec() + 4), 'retry-after': '4' },
+      body: JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limit exceeded' } }) }];
+    const t4 = Date.now();
+    r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', stream: true, messages: [] } });
+    ok(r.status === 429 && Date.now() - t4 < 3000, 'holdStream:false gives the immediate refusal back',
+      `HTTP ${r.status} in ${Date.now() - t4}ms`);
   } finally {
     if (gw) try { gw.kill(); } catch {}
     fake.close();

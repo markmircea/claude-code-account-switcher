@@ -13,7 +13,7 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, isInferencePath } from './config.mjs';
+import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, applyQuotaShim, isInferencePath } from './config.mjs';
 import { notifySwitch } from './notify.mjs';
 import { resolveBearer, describeIdentity } from './creds.mjs';
 
@@ -205,6 +205,99 @@ function allowedHost(h, port) {
   return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
 }
 
+// Headers forwarded upstream: drop hop-by-hop and the client's credential, keep everything else
+// (anthropic-beta and the oauth capability in particular - the upstream needs it in subscription mode).
+function forwardHeaders(req, token, secretHdr = 'x-gw-secret') {
+  const headers = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    const lk = k.toLowerCase();
+    if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'authorization' || lk === 'accept-encoding') continue;
+    if (lk === secretHdr) continue; // local-only, never leaves the machine
+    if (typeof v === 'string' || typeof v === 'number') headers[k] = v;
+  }
+  headers.authorization = `Bearer ${token}`;
+  return headers;
+}
+
+// One pass over the pool, used by the long hold after it has waited the window out. Deliberately
+// simpler than the inline path above (no notifications, no nested holds): by then the decision is
+// only "who can answer now".
+async function attemptWithPool({ cfg, req, body, url, model, sessionId, secretHdr }) {
+  const exclude = new Set();
+  for (let i = 0; i < Math.max(1, pool(cfg).length); i++) {
+    const sel = pickAccount(cfg, accountState, exclude, model);
+    if (!sel.account) return { sel, up: null };
+    const cred = resolveBearer(sel.account);
+    if (cred.err) return { sel, up: null, credErr: cred.err };
+    try {
+      const up = await fetch(url, {
+        method: req.method || 'POST',
+        headers: forwardHeaders(req, cred.token, secretHdr),
+        body: body.length ? body : undefined,
+      });
+      observeQuota(sel.account, up.headers, up.status, model, true);
+      if (up.status !== 429 && up.status !== 529) return { sel, up };
+      try { up.body?.cancel(); } catch { /* not needed */ }
+      exclude.add(sel.account.label);
+    } catch (e) {
+      logLine({ ts: Date.now(), account: sel.account.label, path: url, err: String(e?.cause?.code || e?.message || e).slice(0, 200), sessionId });
+      exclude.add(sel.account.label);
+    }
+  }
+  return { sel: null, up: null };
+}
+
+// Keep a streaming request alive across a long quota wait, then serve it.
+// The client sees: 200 + SSE, ping frames every 20s, then the real message frames. It never sees the
+// refusal, so the turn never ends and nothing has to be re-typed.
+async function holdStreamed({ req, res, cfg, body, url, model, sessionId, t0, refused, refusedAccount, open }) {
+  const secretHdr = (cfg.secretHeader || 'x-gw-secret').toLowerCase();
+  const waitMs = Math.max(0, open.readyAt - Date.now());
+  const out = { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache', 'x-gw-held': String(waitMs) };
+  // Pass the refusal's quota headers through, pool-corrected, so the client's own countdown stays
+  // honest while the turn is still in flight.
+  for (const [k, v] of refused.headers) {
+    if (k.startsWith('anthropic-ratelimit') || k === 'retry-after') out[k] = v;
+  }
+  const shim = refusedAccount ? poolQuotaShim(cfg, accountState, refusedAccount, Date.now()) : null;
+  applyQuotaShim(out, shim);
+  res.writeHead(200, out);
+  let aborted = false;
+  res.on('close', () => { aborted = true; });
+  const pingFrame = 'event: ping\ndata: {"type":"ping"}\n\n';
+  res.write(pingFrame); // immediate: the client sees motion rather than silence
+  const pings = setInterval(() => { if (!res.writableEnded && !res.destroyed) res.write(pingFrame); }, 20_000);
+  logLine({ ts: Date.now(), event: 'hold-stream', waitMs, via: open.label, sessionId, model });
+  try {
+    await Promise.race([
+      new Promise((r) => setTimeout(r, waitMs + 800)),
+      new Promise((r) => res.once('close', r)),
+    ]);
+    if (aborted) { logLine({ ts: Date.now(), event: 'hold-stream-abort', waitedMs: Date.now() - t0, sessionId }); return; }
+    reloadStateIfChanged();
+    const { sel, up } = await attemptWithPool({ cfg, req, body, url, model, sessionId, secretHdr });
+    if (up && up.status < 400 && up.body) {
+      const src = Readable.fromWeb(up.body);
+      let bytes = 0;
+      src.on('data', (c) => { bytes += c.length; });
+      src.on('close', () => logLine({ ts: Date.now(), account: sel?.account?.label || null, path: url.split('?')[0],
+        status: up.status, sessionId, model, bytes, heldMs: waitMs, totalMs: Date.now() - t0, resumed: true }));
+      src.on('error', () => { try { res.destroy(); } catch {} });
+      src.pipe(res);
+      return;
+    }
+    // Still refused after waiting the window out: end the stream with a real error frame rather than
+    // a silent hang, so the client reports it normally.
+    res.write('event: error\ndata: ' + JSON.stringify({ type: 'error',
+      error: { type: 'rate_limit_error', message: 'Rate limit exceeded' } }) + '\n\n');
+    res.end();
+    logLine({ ts: Date.now(), event: 'hold-stream-refused', account: sel?.account?.label || null, sessionId, model,
+      totalMs: Date.now() - t0 });
+  } finally {
+    clearInterval(pings);
+  }
+}
+
 // Non-inference traffic in supported mode: forward with the credential the client presented. The
 // vault tokens are inference-only, so letting them sign account/model/usage calls would either 403
 // or tell the client something about the wrong account. Our local secret header never travels.
@@ -318,6 +411,7 @@ async function handle(req, res) {
   // would double-bill and duplicate text into the same transcript.
   const tried = new Set();
   const model = (() => { try { return JSON.parse(body.toString('utf8')).model; } catch { return null; } })();
+  const wantsStream = (() => { try { return JSON.parse(body.toString('utf8')).stream === true; } catch { return false; } })();
   const maxAttempts = Math.max(1, pool(cfg).length);
   let sel = null, up = null, noAccountReason = null, credStale = false;
   let heldMs = 0;
@@ -341,14 +435,8 @@ async function handle(req, res) {
           `claude-gw cannot read a credential for "${sel.account.label}": ${cred.err}`, cred.err);
       }
 
-      const headers = {};
-      for (const [k, v] of Object.entries(req.headers)) {
-        const lk = k.toLowerCase();
-        if (HOP_BY_HOP.has(lk) || lk === 'host' || lk === 'authorization' || lk === 'accept-encoding') continue;
-        if (lk === (cfg.secretHeader || 'x-gw-secret').toLowerCase()) continue; // local-only
-        if (typeof v === 'string' || typeof v === 'number') headers[k] = v;
-      }
-      headers.authorization = `Bearer ${cred.token}`;
+      const headers = forwardHeaders(req, cred.token, (cfg.secretHeader || 'x-gw-secret').toLowerCase());
+      headers['content-type'] = req.headers['content-type'] || 'application/json';
       credStale = !!cred.meta?.stale;
 
       let r;
@@ -398,6 +486,20 @@ async function handle(req, res) {
     reloadStateIfChanged();
   }
 
+  // A wait measured in minutes or hours cannot be held silently - the client stops caring about a
+  // connection that sends no bytes for roughly five minutes. For a streaming request we can still
+  // recover: commit the stream now, keep it alive with ping frames, and forward for real the moment
+  // the pool reopens. This is what keeps an extension-panel chat (which never arms Claude Code's own
+  // wait) alive until the nearest account frees.
+  if (up && (up.status === 429 || up.status === 529) && wantsStream && cfg.holdStream !== false && !res.writableEnded) {
+    const open = poolOpening(cfg, accountState, Date.now());
+    const waitMs = open ? open.readyAt - Date.now() : Infinity;
+    if (waitMs > 0 && waitMs <= (cfg.holdStreamMaxMs ?? 6 * 3600_000)) {
+      return holdStreamed({ req, res, cfg, body, url, model, sessionId, t0, refused: up,
+        refusedAccount: sel?.account?.label || null, open });
+    }
+  }
+
   if (!up) {
     // Explicit, immediate failure - never stall (empty rotation must fail loudly).
     return errRes(res, 503, 'rate_limit_error',
@@ -422,16 +524,7 @@ async function handle(req, res) {
   let shim = null;
   if (up.status === 429) {
     shim = poolQuotaShim(cfg, accountState, sel.account.label, Date.now());
-    if (shim) {
-      for (const win of ['5h', '7d']) {
-        const stKey = `anthropic-ratelimit-unified-${win}-status`;
-        if (out[stKey] === 'rejected') out[`anthropic-ratelimit-unified-${win}-reset`] = String(shim.readyEpochSec);
-      }
-      if (out['anthropic-ratelimit-unified-status'] === 'rejected') {
-        out['anthropic-ratelimit-unified-reset'] = String(shim.readyEpochSec);
-      }
-      out['retry-after'] = String(shim.retryAfter);
-    }
+    applyQuotaShim(out, shim);
   }
 
   const ttfb = Date.now() - t0;
