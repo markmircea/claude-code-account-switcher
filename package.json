@@ -1,0 +1,14 @@
+{
+  "name": "claude-gw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Localhost gateway that serves Claude Code inference from a selectable pool of accounts (phase 2: manual selection, single account).",
+  "bin": { "cla-gw": "src/cli.mjs" },
+  "scripts": {
+    "start": "node src/cli.mjs start",
+    "status": "node src/cli.mjs status",
+    "smoke": "node src/smoke.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
