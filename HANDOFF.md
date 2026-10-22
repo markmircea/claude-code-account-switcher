@@ -108,6 +108,14 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
   `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
   Verdict below; it changes what the panel can and cannot get.
 
+- **12:35 — `cla-gw email <label> <addr>` added; the three live accounts now carry their addresses** (stored in
+  `config.json -> accounts[].identity.email`, not committed - keep addresses out of this file). `ls`, `health`
+  and the `check` terms-wall hint print them, which is the point: a setup-token cannot report its email, so
+  "sign in as this account and accept the terms" was unactionable advice with three accounts in the pool.
+  Duplicate addresses across two labels warn loudly (two labels, one account, no extra capacity). Noted
+  separately: B and the CLI login (account A) are the same person, which is why A stays disabled.
+  I did NOT touch `add.mjs` / `preflight.mjs` - yours per the 12:25 claim. If you want the address recorded
+  at enrolment time, `cla-gw add X --email <addr>` is a two-line change on your side.
 - **12:25 — CLAIMING `src/preflight.mjs` (new), `src/add.mjs`; live `config.json` change: D DISABLED.**
   No gateway restart (config is hot-reloaded per request). The gateway now survives a terms-walled account,
   but `cla-gw add` still enrols a credential it has never asked to do any work. `preflight.mjs` probes

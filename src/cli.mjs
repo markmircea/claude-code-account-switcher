@@ -183,7 +183,7 @@ async function main() {
       console.log(`per-account quota state — learned from rate-limit headers on real traffic (F27/F28/F29); nothing is polled, so vault-only tokens are covered too: ${ACCOUNT_STATE_PATH}`);
       for (const a of cfg.accounts) {
         console.log(`\n${a.label}${a.enabled === false ? ' (DISABLED)' : ''}: ${stateLine(st[a.label])}`);
-        if (st[a.label]?.org) console.log(`   org=${st[a.label].org}  workspace=${st[a.label].workspace || '?'}`);
+        if (st[a.label]?.org) console.log(`   org=${st[a.label].org}  workspace=${st[a.label].workspace || '?'}` + (a.identity?.email ? `  email=${a.identity.email}` : ''));
         const gates = Object.entries(st[a.label]?.modelGate || {}).filter(([, u]) => u > Date.now());
         if (gates.length) {
           const hits = st[a.label].modelGateHits || {};
@@ -214,10 +214,34 @@ async function main() {
         const acc = cfg.accounts.find((a) => a.label === label);
         if (!r.ok) bad++;
         console.log(`  ${r.ok ? 'ok  ' : 'FIX '} ${label}${acc?.enabled === false ? ' (DISABLED in pool)' : ''}: ${r.verdict}${r.detail ? ` - ${r.detail}` : ''}`);
-        if (r.verdict === 'terms-wall') console.log(`       -> sign in to claude.ai with this account's email (org ${readAccountState()[label]?.org || acc?.identity?.org || '?'}) and accept the terms, then: cla-gw enable ${label}`);
+        if (r.verdict === 'terms-wall') {
+          const who = acc?.identity?.email || `the account with org ${(readAccountState()[label]?.org || acc?.identity?.org || '?').slice(0, 8)}…`;
+          console.log(`       -> sign in to claude.ai as ${who} and accept the terms, then: cla-gw enable ${label}`);
+        }
       }
       console.log(bad ? `\n${bad} account(s) cannot serve at all right now. Waiting will not fix a terms wall.` : '\nall probed accounts can serve inference');
       process.exitCode = bad ? 1 : 0;
+      return;
+    }
+
+    case 'email': {
+      // A setup-token cannot report who it belongs to, and "sign in as this account" is useless advice
+      // when the pool has three of them. Record the address; org id stays the thing that catches a
+      // duplicate enrolment of the same account.
+      const label = argv[1], addr = (argv[2] || '').trim();
+      const acc = cfg.accounts.find((a) => a.label === label);
+      if (!acc) { console.log(`no such account: ${label}
+pool: ${cfg.accounts.map((a) => a.label).join(', ')}`); process.exitCode = 2; return; }
+      if (!addr) {
+        console.log(`usage: cla-gw email <label> <email-on-claude.ai>`);
+        console.log(`known now: ${cfg.accounts.map((a) => `${a.label}=${a.identity?.email || '?'}`).join('  ')}`);
+        return;
+      }
+      if (!/^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$/.test(addr)) { console.log(`that is not an email address: ${addr}`); process.exitCode = 2; return; }
+      const dup = cfg.accounts.find((a) => a.label !== label && a.identity?.email?.toLowerCase() === addr.toLowerCase());
+      acc.identity = { ...(acc.identity || {}), email: addr, emailSource: 'user' };
+      saveConfig(cfg);
+      console.log(`${label} -> ${addr}${dup ? `  WARNING: "${dup.label}" is already recorded as ${addr}; two labels, one account - that is not extra capacity` : ''}`);
       return;
     }
 
@@ -314,7 +338,7 @@ Re-run with --yes if you really mean deletion.`);
 
     default:
       console.log('usage: cla-gw start | stop | status | health | check [labels] | doctor | activate [--legacy|--no-startup] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
-      console.log('       use <label>|none | enable <label> | disable <label> | env | clear-env | statusline');
+      console.log('       use <label>|none | enable <label> | disable <label> | email <label> <addr> | check [labels] | env | clear-env | statusline');
   }
 }
 
