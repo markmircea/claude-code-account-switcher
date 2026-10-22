@@ -283,6 +283,29 @@ async function main() {
     r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', stream: true, messages: [] } });
     ok(r.status === 429 && Date.now() - t4 < 3000, 'holdStream:false gives the immediate refusal back',
       `HTTP ${r.status} in ${Date.now() - t4}ms`);
+
+    // 8. terms wall: an account that has to accept the updated Consumer Terms cannot serve at all.
+    //    Routed around and parked, not surfaced as a mysterious 400 in front of every chat.
+    writeFixture({});
+    await sleep(900);
+    script = [
+      { status: 400, body: JSON.stringify({ type: 'error', error: { type: 'invalid_request_error',
+        message: "We've updated our Consumer Terms and Privacy Policy. You'll need to accept them in claude.ai with the email in /status to continue." } }) },
+      { status: 200, headers: { 'anthropic-ratelimit-unified-status': 'allowed' } },
+    ];
+    r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', stream: true, messages: [] } });
+    ok(r.status === 200, 'a terms-walled account is routed around, not handed to the client', `HTTP ${r.status}`);
+    ok(readLog().some((l) => l.event === 'consent-required' && l.account === 'B'),
+       'the terms wall is recorded against the account that hit it');
+    const st2 = JSON.parse(fs.readFileSync(path.join(UPSTREAM_DIR, 'accounts_state.json'), 'utf8'));
+    ok(st2.B?.consentUntil > Date.now(), 'that account is parked, so selection skips it for a while',
+      st2.B?.consentUntil ? `until ${new Date(st2.B.consentUntil).toLocaleTimeString()}` : 'not parked');
+    ok(readLog().filter((l) => l.status === 200).length > 0, 'the mate served the same request');
+    // and a plain 400 - the client's own problem - must still arrive verbatim, body already read
+    script = [{ status: 400, body: '{"type":"error","error":{"type":"invalid_request_error","message":"bad model"}}' }];
+    r = await call('/v1/messages?beta=true', { body: { model: 'claude-opus-5-5', messages: [] } });
+    ok(r.status === 400 && r.text.includes('bad model'), 'an ordinary 400 still reaches the client untouched',
+      `${r.status} ${String(r.text).slice(0, 44)}`);
   } finally {
     if (gw) try { gw.kill(); } catch {}
     fake.close();

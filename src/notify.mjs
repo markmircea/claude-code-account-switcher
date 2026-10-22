@@ -107,6 +107,18 @@ export async function notify(title, body = '') {
   return 'balloon';
 }
 
+// A terms wall cannot be fixed by waiting, so it is worth interrupting for - but only once per park.
+const consentNoticed = new Map();
+export function notifyConsent(label, org = '') {
+  const now = Date.now();
+  if (now - (consentNoticed.get(label) || 0) < 30 * 60 * 1000) return false;
+  consentNoticed.set(label, now);
+  // A setup-token cannot report its email, so the org id is the only handle on WHICH account this is.
+  notify(`claude-gw: ${label} needs the terms accepted`,
+    `org ${String(org).slice(0, 8) || 'unknown'} - open claude.ai as that account and accept; parked 30 min`);
+  return true;
+}
+
 export function notifySwitch(from, to, why = '') {
   const key = `${from}->${to}`;
   const now = Date.now();

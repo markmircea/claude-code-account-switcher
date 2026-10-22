@@ -26,6 +26,8 @@ function stateLine(s) {
   const when = (epoch) => (epoch ? new Date(epoch * 1000).toLocaleString() : '?');
   const parked = s.blockedUntil && s.blockedUntil > Date.now()
     ? `  PARKED(${s.parkReason || '?'} until ${new Date(s.blockedUntil).toLocaleString()})` : '';
+  const terms = s.consentUntil && s.consentUntil > Date.now()
+    ? `  NEEDS TERMS at claude.ai (org ${s.orgId ? String(s.orgId).slice(0, 8) + ' - ' : ''}parked until ${new Date(s.consentUntil).toLocaleTimeString()})` : '';
   const bare = s.bare429 ? `  headerless-429s=${s.bare429}` : '';
   const blind = (s.u5h == null && s.u7d == null) ? '  [quota state not seen from real traffic yet]' : '';
   // Usage is only learned from responses, so a window that has reset since this account last served
@@ -34,7 +36,7 @@ function stateLine(s) {
     ? `reset ${new Date(reset * 1000).toLocaleTimeString()}, not used since`
     : `${pct(u)}/${st || 'n/a'}`);
   return `5h ${win(s.u5h, s.s5h, s.r5h)}  7d ${win(s.u7d, s.s7d, s.r7d)}  claim=${s.claim || '?'}  ` +
-         `7d resets ${when(s.r7d)}  reqs=${s.requests || 0}${parked}${bare}${blind}`;
+         `7d resets ${when(s.r7d)}  reqs=${s.requests || 0}${parked}${terms}${bare}${blind}`;
 }
 
 function orgWarning(cfg) {

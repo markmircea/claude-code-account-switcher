@@ -64,6 +64,7 @@ async function main() {
       if (s[stKey] === 'rejected' && s[rKey] && s[rKey] * 1000 > now) r = Math.max(r, s[rKey] * 1000);
     }
     if (!r && s.blockedUntil > now) r = s.blockedUntil;
+    if (s.consentUntil > now) r = Math.max(r, s.consentUntil); // terms wall: cannot serve either
     return r;
   };
   const poolLabels = st.pool || [];

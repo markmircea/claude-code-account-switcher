@@ -13,8 +13,8 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, applyQuotaShim, isInferencePath } from './config.mjs';
-import { notifySwitch, notifyPoolOpen } from './notify.mjs';
+import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, applyQuotaShim, isInferencePath, isConsentWall, markConsentRequired, CONSENT_PARK_MS } from './config.mjs';
+import { notifySwitch, notifyPoolOpen, notifyConsent } from './notify.mjs';
 import { resolveBearer, describeIdentity } from './creds.mjs';
 
 const HOP_BY_HOP = new Set([
@@ -438,6 +438,8 @@ async function handle(req, res) {
   const maxAttempts = Math.max(1, pool(cfg).length);
   let sel = null, up = null, noAccountReason = null, credStale = false;
   let heldMs = 0;
+  let consent = null;      // a terms wall we saw: label + the upstream text, which is the fix message
+  let consumed = null;     // body of a response we already read (bodies are single-use)
 
   // Two rounds at most: round 2 only happens if we deliberately held the request because the pool
   // was about to free up anyway. Nothing is replayed once bytes have reached the client, and nothing
@@ -474,6 +476,29 @@ async function handle(req, res) {
 
       observeQuota(sel.account, r.headers, r.status, model, sel.reason !== 'detour');
       up = r;
+
+      // A terms wall is not quota and not the client's problem: that account cannot serve at all until
+      // someone accepts the updated Consumer Terms in claude.ai. Park it under its own window name so
+      // selection routes around it, keep the upstream text (it is the actionable part), and try an
+      // account that can actually answer. Without this, one half-provisioned account black-holes every
+      // chat on the machine with a 400 the failover logic used to treat as "not our business".
+      if (r.status === 400) {
+        const text = await r.text();
+        if (isConsentWall(text)) {
+          consent = { label: sel.account.label, text };
+          markConsentRequired(accountState[sel.account.label] ||= {}, Date.now());
+          persistState();
+          logLine({ ts: Date.now(), event: 'consent-required', account: sel.account.label, sessionId,
+            parkedMs: CONSENT_PARK_MS, model });
+          notifyConsent(sel.account.label, accountState[sel.account.label]?.orgId || sel.account.orgId || '');
+          tried.add(sel.account.label);
+          up = null;   // body consumed above - it must never be replayed as a live stream
+          continue;
+        }
+        consumed = text;   // an ordinary 400: the client's problem, passed through verbatim below
+        break;
+      }
+
       // Only quota/overload responses are worth moving off. 4xx/5xx of any other kind are the client's
       // or upstream's problem and get passed through untouched.
       if (r.status !== 429 && r.status !== 529) break;
@@ -521,6 +546,30 @@ async function handle(req, res) {
       return holdStreamed({ req, res, cfg, body, url, model, sessionId, t0, refused: up,
         refusedAccount: sel?.account?.label || null, open });
     }
+  }
+
+  // Every reachable account is behind the terms wall: hand the upstream message through untouched,
+  // because it is the one thing that tells the user what to click.
+  if (!up && consent) {
+    res.writeHead(400, { 'content-type': 'application/json', 'x-gw-consent': consent.label });
+    res.end(consent.text);
+    logLine({ ts: Date.now(), account: consent.label, path: reqPath, method, status: 400, sessionId,
+      model, ms: Date.now() - t0, consent: true });
+    return;
+  }
+
+  // A response whose body we already read (any 400, to tell a terms wall from a bad request) is
+  // re-sent as text; the stream is spent and must not be piped.
+  if (up && consumed !== null) {
+    const hdr = { 'content-type': up.headers.get('content-type') || 'application/json' };
+    for (const [k, v] of up.headers) {
+      if (k.startsWith('anthropic-ratelimit') || k.toLowerCase() === 'retry-after') hdr[k] = v;
+    }
+    res.writeHead(up.status, hdr);
+    res.end(consumed);
+    logLine({ ts: Date.now(), account: sel?.account?.label || null, path: reqPath, method, status: up.status,
+      sessionId, model, ms: Date.now() - t0 });
+    return;
   }
 
   if (!up) {

@@ -137,12 +137,28 @@ export function pool(cfg) {
 // When is this account actually able to serve a request? A request needs EVERY window to allow, so
 // the account is ready at the LATEST reset among its rejected windows - not the earliest. A's 5h
 // window refills tonight while its weekly stays blown until Oct 16; A is unusable until Oct 16.
+// The upstream text that means "this account must accept the updated consumer terms". Matched on the
+// body, never the status: a 400 is otherwise the client's problem and must pass through untouched.
+export const CONSENT_PARK_MS = 30 * 60_000;
+export function isConsentWall(text) {
+  return /Consumer Terms|Privacy Policy|accept them in claude\.ai/i.test(String(text || ''));
+}
+export function markConsentRequired(s, now = Date.now(), ms = CONSENT_PARK_MS) {
+  s.consentUntil = now + ms;
+  s.consentFlaggedAt = now;
+  return s;
+}
+
 export function availability(s, now = Date.now()) {
   if (!s) return { blocked: [], readyAt: 0 };
   const blocked = [];
   for (const [win, st, reset] of [['5h', s.s5h, s.r5h], ['7d', s.s7d, s.r7d]]) {
     if (st === 'rejected' && reset && reset * 1000 > now) blocked.push({ win, readyAt: reset * 1000 });
   }
+  // A terms-of-service wall ("accept the updated Consumer Terms in claude.ai") is not quota: the
+  // account cannot serve at all until a human clicks. It gets its own window name so the pool routes
+  // around it and the status line can say what to do instead of showing a phantom quota window.
+  if (s.consentUntil && s.consentUntil > now) blocked.push({ win: 'terms', readyAt: s.consentUntil });
   // A headerless 429 gives no window and no epoch; it parks briefly under the legacy field.
   if (s.blockedUntil && s.blockedUntil > now && !blocked.some((b) => b.win === 'blip')) {
     if (s.parkReason === 'unspecified-429') blocked.push({ win: 'blip', readyAt: s.blockedUntil });

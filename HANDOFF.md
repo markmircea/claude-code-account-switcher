@@ -108,6 +108,16 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
   `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
   Verdict below; it changes what the panel can and cannot get.
 
+- **11:50 — consent walls are now a first-class account state; gateway RESTARTED at 11:50.** Account D (org
+  fc3a5866) came back from `cla-gw add` with `400 We've updated our Consumer Terms... accept them in
+  claude.ai`. Six of those in three seconds, every chat dead, because the failover loop treats any non
+  429/529 as "the client's problem" and passes it through. Now: a 400 whose body matches the terms wall
+  parks that account 30 min under a `terms` window (`markConsentRequired`), routes around it, pops once
+  with the org id (a setup-token cannot report its email), logs `consent-required`, and shows as
+  `NEEDS TERMS at claude.ai` in `cla-gw ls`. An ordinary 400 is still passed through verbatim - it is read
+  to text and re-sent, since bodies are single-use, which is why the delivery path has a new branch. 36
+  checks. Do not "fix" this by fail-over-retrying all 400s: that replays genuinely bad client requests
+  around the pool.
 - **11:35 — notify.mjs rewritten (popup is now the primary path) + gateway RESTARTED at 11:36 to load it.**
   `cla-gw notify` printed "sent via toast" while showing nothing: the WinRT toast path returns exit 0 when
   Windows silently drops an unregistered-AUMID notification, so it cannot be trusted to mean "seen". Now:
