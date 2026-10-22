@@ -1,15 +1,22 @@
 {
   "name": "claude-gw-status",
   "displayName": "claude-gw status",
-  "description": "Status bar: which claude-gw account is serving Claude Code, and each account's 5h / weekly usage",
-  "version": "0.1.0",
+  "description": "claude-gw: which Claude account is serving, what is left of its windows, when the pool reopens, and what the traffic would have cost on the API.",
+  "version": "0.2.0",
   "publisher": "local",
-  "engines": { "vscode": "^1.80.0" },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
   "main": "./extension.js",
-  "activationEvents": ["onStartupFinished"],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
-      { "command": "claudeGw.health", "title": "claude-gw: Show account health" }
+      {
+        "command": "claudeGw.health",
+        "title": "claude-gw: Show account health"
+      }
     ]
   }
 }

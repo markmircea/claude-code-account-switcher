@@ -16,6 +16,7 @@ import { addAccount } from './add.mjs';
 import { vaultLs, vaultRm } from './vault.mjs';
 import { activate, deactivate, doctor, runWithoutGateway } from './activate.mjs';
 import { preflightAccount } from './preflight.mjs';
+import { priceFor, PRICE_TABLE } from './config.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const argv = process.argv.slice(2);
@@ -242,6 +243,58 @@ pool: ${cfg.accounts.map((a) => a.label).join(', ')}`); process.exitCode = 2; re
       acc.identity = { ...(acc.identity || {}), email: addr, emailSource: 'user' };
       saveConfig(cfg);
       console.log(`${label} -> ${addr}${dup ? `  WARNING: "${dup.label}" is already recorded as ${addr}; two labels, one account - that is not extra capacity` : ''}`);
+      return;
+    }
+
+    case 'cost': {
+      // What the routed traffic would have cost on a metered API key. Only useful if the rates are right,
+      // so the table actually used is printed with it, along with where to correct it.
+      const di = argv.indexOf('--days');
+      const days = di > 0 && argv[di + 1] ? Number(argv[di + 1]) : 7;
+      const since = Date.now() - days * 86400_000;
+      let rows = [];
+      try {
+        rows = fs.readFileSync(LOG_PATH, 'utf8').split('\n').filter(Boolean)
+          .map((s) => { try { return JSON.parse(s); } catch { return null; } })
+          .filter((l) => l && l.usage && l.ts >= since);
+      } catch { console.log(`no log yet at ${LOG_PATH}`); return; }
+      if (!rows.length) {
+        console.log(`no token usage recorded in the last ${days} day(s).`);
+        console.log('usage is captured from responses the gateway serves, so this needs traffic AND a');
+        console.log('gateway running the version that records it (the log line carries a "usage" object).');
+        return;
+      }
+      const byModel = new Map(), byAccount = new Map(), byDay = new Map();
+      for (const l of rows) {
+        const m = l.model || 'unknown';
+        const t = byModel.get(m) || { in: 0, out: 0, cw: 0, cr: 0, usd: 0, n: 0 };
+        t.in += l.usage.in || 0; t.out += l.usage.out || 0;
+        t.cw += l.usage.cw || 0; t.cr += l.usage.cr || 0;
+        t.usd += l.costUsd || 0; t.n++;
+        byModel.set(m, t);
+        const a = byAccount.get(l.account || '?') || { usd: 0, n: 0 };
+        a.usd += l.costUsd || 0; a.n++;
+        byAccount.set(l.account || '?', a);
+        const d = new Date(l.ts).toISOString().slice(0, 10);
+        byDay.set(d, (byDay.get(d) || 0) + (l.costUsd || 0));
+      }
+      const money = (v) => `$${v.toFixed(v < 1 ? 4 : 2)}`;
+      const tok = (v) => v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : v >= 1e3 ? `${(v / 1e3).toFixed(1)}k` : String(v);
+      const total = [...byModel.values()].reduce((a, t) => a + t.usd, 0);
+      console.log(`API-equivalent cost for the last ${days} day(s), from ${rows.length} served responses\n`);
+      console.log('  model                       reqs    input   output   cache-w   cache-r    list price');
+      for (const [m, t] of [...byModel.entries()].sort((a, b) => b[1].usd - a[1].usd)) {
+        console.log(`  ${m.padEnd(25)} ${String(t.n).padStart(5)} ${tok(t.in).padStart(8)} ${tok(t.out).padStart(8)} ${tok(t.cw).padStart(9)} ${tok(t.cr).padStart(9)} ${money(t.usd).padStart(11)}`);
+      }
+      console.log(`\n  total at list: ${money(total)}`);
+      console.log(`  (cache reads are included on purpose - they are why a long agent session would look`);
+      console.log(`   ruinous on a metered key and are exactly what the subscription is buying)`);
+      console.log(`\n  by day:     ${[...byDay.entries()].sort().map(([d, v]) => `${d.slice(5)} ${money(v)}`).join('  ')}`);
+      console.log(`  by account: ${[...byAccount.entries()].sort((a, b) => b[1].usd - a[1].usd).map(([a, v]) => `${a} ${money(v.usd)}/${v.n}req`).join('  ')}`);
+      const fams = [...new Set(rows.map((l) => l.priceFamily).filter(Boolean))];
+      console.log(`\n  rates used (USD per Mtok): ${fams.map((f) => { const p = priceFor('claude-' + f, cfg); return `${f} in ${p.in} / out ${p.out} / cacheW ${p.cacheWrite} / cacheR ${p.cacheRead}`; }).join('   ')}`);
+      console.log(`  (defaults for unknown families: sonnet). Correct them in ${CONFIG_PATH}`);
+      console.log(`  e.g. "prices": {"opus": {"in": 15, "out": 75}} or per exact model id.`);
       return;
     }
 

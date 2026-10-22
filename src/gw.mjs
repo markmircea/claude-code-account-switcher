@@ -13,7 +13,7 @@ import http from 'node:http';
 import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, applyQuotaShim, isInferencePath, isConsentWall, markConsentRequired, CONSENT_PARK_MS } from './config.mjs';
+import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, applyQuotaShim, isInferencePath, isConsentWall, markConsentRequired, CONSENT_PARK_MS, newUsage, scanUsage, usageCost, poolReopening } from './config.mjs';
 import { notifySwitch, notifyPoolOpen, notifyConsent } from './notify.mjs';
 import { resolveBearer, describeIdentity } from './creds.mjs';
 
@@ -27,7 +27,26 @@ const DECODED_AWAY = new Set(['content-encoding', 'content-length']);
 const MAX_BODY = 64 * 1024 * 1024;
 
 const startedAt = Date.now();
-const stats = { requests: 0, byAccount: {}, errors: 0, recent: [] };
+const stats = { requests: 0, byAccount: {}, byAccountCost: {}, costUsd: 0, costByDay: {}, errors: 0, recent: [] };
+const dayKey = (ts = Date.now()) => new Date(ts).toISOString().slice(0, 10);
+
+// stats is per-process, but the status bar shows "today". Without this, a restart mid-day would drop
+// the day's spend to $0.00 and the number would silently be wrong. The log is the durable record, so
+// the day is re-read from it on boot (tail only - it is an append-only file that grows all week).
+try {
+  const raw = fs.readFileSync(LOG_PATH, 'utf8');
+  const tail = raw.length > 4_000_000 ? raw.slice(-4_000_000) : raw;
+  for (const line of tail.split('\n')) {
+    if (!line.trim()) continue;
+    let l = null;
+    try { l = JSON.parse(line); } catch { continue; }
+    if (!l || !l.usage || typeof l.costUsd !== 'number') continue;
+    const dk = dayKey(l.ts);
+    stats.costByDay[dk] = (stats.costByDay[dk] || 0) + l.costUsd;
+    stats.costUsd += l.costUsd;
+    if (l.account) stats.byAccountCost[l.account] = (stats.byAccountCost[l.account] || 0) + l.costUsd;
+  }
+} catch { /* no log yet */ }
 
 // Per-account quota state, learned from the unified rate-limit headers that EVERY /v1/messages
 // response carries (F27) - including for vault tokens, which cannot read /api/oauth/usage at all
@@ -150,6 +169,10 @@ function writeStatus(cfg, force = false) {
       byAccount: stats.byAccount,
       requests: stats.requests,
       errors: stats.errors,
+      // "what would this have cost on the API" - today, and since this gateway process started
+      cost: { todayUsd: stats.costByDay[dayKey()] || 0, totalUsd: stats.costUsd,
+        byDay: stats.costByDay, byAccount: stats.byAccountCost },
+      opening: poolReopening(cfg, accountState, now),
       sessions: Array.from(sessions.entries()).slice(-25),
       accounts: accountState,
     }));
@@ -302,9 +325,24 @@ async function holdStreamed({ req, res, cfg, body, url, model, sessionId, t0, re
     if (up && up.status < 400 && up.body) {
       const src = Readable.fromWeb(up.body);
       let bytes = 0;
-      src.on('data', (c) => { bytes += c.length; });
-      src.on('close', () => logLine({ ts: Date.now(), account: sel?.account?.label || null, path: url.split('?')[0],
-        status: up.status, sessionId, model, bytes, heldMs: waitMs, totalMs: Date.now() - t0, resumed: true }));
+      const usage = newUsage();
+      src.on('data', (c) => { bytes += c.length; try { scanUsage(usage, c.toString('utf8')); } catch {} });
+      src.on('close', () => {
+        const extra = {};
+        if (usage.in || usage.out || usage.cw || usage.cr) {
+          const cost = usageCost(usage, model, cfg);
+          extra.usage = usage; extra.costUsd = Number(cost.usd.toFixed(6));
+          stats.costUsd += cost.usd;
+          const dk = dayKey();
+          stats.costByDay[dk] = (stats.costByDay[dk] || 0) + cost.usd;
+          if (sel?.account?.label) {
+            stats.byAccountCost[sel.account.label] = (stats.byAccountCost[sel.account.label] || 0) + cost.usd;
+          }
+        }
+        logLine({ ts: Date.now(), account: sel?.account?.label || null, path: url.split('?')[0],
+          status: up.status, sessionId, model, bytes, heldMs: waitMs, totalMs: Date.now() - t0,
+          resumed: true, ...extra });
+      });
       src.on('error', () => { try { res.destroy(); } catch {} });
       src.pipe(res);
       return;
@@ -640,9 +678,26 @@ async function handle(req, res) {
 
   const src = Readable.fromWeb(up.body);
   let bytes = 0;
-  src.on('data', (c) => { bytes += c.length; });
+  // Token accounting: the bytes the client is already receiving get scanned for the usage objects the
+  // API sends anyway. Text frames only, and any error in the scan is swallowed for the same reason.
+  const ct = String(out['content-type'] || '').toLowerCase();
+  const tap = up.status < 400 && (ct.includes('json') || ct.includes('event-stream'));
+  const usage = newUsage();
+  src.on('data', (c) => {
+    bytes += c.length;
+    if (tap) { try { scanUsage(usage, c.toString('utf8')); } catch { /* never break a stream */ } }
+  });
   src.on('close', () => {
-    rec.bytes = bytes; rec.totalMs = Date.now() - t0; logLine(rec);
+    rec.bytes = bytes; rec.totalMs = Date.now() - t0;
+    if (usage.in || usage.out || usage.cw || usage.cr) {
+      const cost = usageCost(usage, model, cfg);
+      rec.usage = usage; rec.costUsd = Number(cost.usd.toFixed(6)); rec.priceFamily = cost.family;
+      stats.costUsd += cost.usd;
+      const dk = dayKey();
+      stats.costByDay[dk] = (stats.costByDay[dk] || 0) + cost.usd;
+      stats.byAccountCost[sel.account.label] = (stats.byAccountCost[sel.account.label] || 0) + cost.usd;
+    }
+    logLine(rec);
     noteSession(sessionId, sel.account.label, up.status);
     writeStatus(cfg);
   });

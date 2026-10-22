@@ -137,8 +137,15 @@ async function main() {
     gw = startGw();
     await sleep(1500);
     script = [{ status: 200, headers: { 'anthropic-ratelimit-unified-status': 'allowed' } }];
-    let r = await call('/v1/messages?beta=true', { bearer: null });
+    let r = await call('/v1/messages?beta=true', { bearer: null, body: { model: 'claude-opus-5-5', messages: [] } });
     ok(r.status === 200, 'x-gw-secret header authenticates', `HTTP ${r.status}`);
+    const served = readLog().find((l) => l.status === 200 && l.usage);
+    ok(!!served && served.usage.in === 1 && served.usage.out === 1,
+       'token usage is captured off the response the client is already receiving',
+       served ? JSON.stringify(served.usage) : 'no usage record');
+    ok(!!served && served.costUsd > 0 && served.priceFamily === 'opus',
+       'the same tokens are priced at API list (cla-opus-5-5 -> opus family)',
+       served ? `$${served.costUsd} @ ${served.priceFamily}` : '');
     script = [{ status: 200, headers: { 'anthropic-ratelimit-unified-status': 'allowed' } }];
     r = await call('/v1/messages?beta=true', { headerSecret: null, bearer: `Bearer ${SECRET}` });
     ok(r.status === 200, 'legacy bearer secret still works (transition window)', `HTTP ${r.status}`);

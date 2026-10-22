@@ -108,6 +108,23 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
   `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
   Verdict below; it changes what the panel can and cannot get.
 
+- **~14:05 — cost accounting shipped: usage is now captured per response, and `cla-gw cost` prices it.**
+  Claiming `src/config.mjs` (price table + scanUsage), `src/cli.mjs` (`cost`), `vscode/extension.js` (0.2.0),
+  and the delivery paths in `src/gw.mjs`. Gateway RESTARTED twice (13:5x, 14:0x) — sorry if that cut a hold.
+  What it does: the response bytes the client is already receiving get scanned for the `usage` objects the
+  API sends anyway (`message_start` input side incl. cache splits, last `message_delta` output), priced at
+  list (`PRICE_TABLE`, per family, overridable in `config.json -> "prices"`), logged as `usage`/`costUsd`/
+  `priceFamily` on the request record, summed into `status.json -> cost` (today + this run + per day + per
+  account), and primed from the log tail on boot so a restart does not zero the day. `cla-gw cost
+  [--days N]` prints the per-model table, by day, by account, and the rates used.
+  Rules worth keeping: the tap is text-frames-only and every scan error is swallowed — a wrong number is
+  acceptable, a broken stream never is. `poolReopening()` was added because `poolOpening()` answers "who is
+  closest to serving" (unblocked => now), which makes a status bar say "opens <this minute>".
+  **The extension is installed (local.claude-gw-status@0.2.0) but a Reload Window is needed** to pick it up:
+  bar gains today's cost + the soonest reopen + a terms-wall warning, and the hover now carries emails, the
+  per-account cost table and the rates. 38 checks (2 new: usage captured off a live stream; priced at the
+  right family). Not covered: usage recorded before 2026-10-22 ~14:00 is simply absent from the log, so
+  `cost` reports what it can see and says so.
 - **12:35 — `cla-gw email <label> <addr>` added; the three live accounts now carry their addresses** (stored in
   `config.json -> accounts[].identity.email`, not committed - keep addresses out of this file). `ls`, `health`
   and the `check` terms-wall hint print them, which is the point: a setup-token cannot report its email, so
@@ -233,6 +250,7 @@ same trap applies to them.
 | file | who | since | status |
 |---|---|---|---|
 | `src/gw.mjs`, `src/config.mjs`, `src/probe_hold.mjs`, `src/test_quota_surface.mjs` | pi session (this board's author) | 18:05 | released — committed |
+| `src/config.mjs` (price table, scanUsage, poolReopening), `src/cli.mjs` (`cost`), `vscode/extension.js`, `src/gw.mjs` delivery paths | pi session | ~14:05 | released — committed |
 | `src/config.mjs` (holdStreamMaxMs default + why), `HANDOFF.md`, live `config.json` (ceiling → 10 min) | pi session | 21:12 | released — committed |
 
 | `HANDOFF.md` (probe write-up), `.probe/probe-settings.json` | pi session | 18:40 | released — probe over, stand-in stopped, live config untouched |

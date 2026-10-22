@@ -319,6 +319,20 @@ export function poolOpening(cfg, state = {}, now = Date.now()) {
   return best;
 }
 
+// When the pool next GAINS capacity - only accounts actually blocked count, and null when nobody is.
+// poolOpening() answers a different question ("who is closest to serving", where unblocked means now),
+// which is a fine answer for routing and a confusing one for a status bar.
+export function poolReopening(cfg, state = {}, now = Date.now()) {
+  let best = null;
+  for (const a of pool(cfg)) {
+    const av = availability(state[a.label], now);
+    if (av.blocked.length && av.readyAt > now && (!best || av.readyAt < best.readyAt)) {
+      best = { label: a.label, readyAt: av.readyAt };
+    }
+  }
+  return best;
+}
+
 // Should the 429 we are about to hand the client describe the POOL rather than the refusing
 // account? Only ever to SHORTEN the wait, never to lengthen it.
 //
@@ -352,6 +366,51 @@ export function applyQuotaShim(out, shim) {
   }
   out['retry-after'] = String(shim.retryAfter);
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// What this traffic would have cost on the API. The subscription is flat and the gateway knows the
+// tokens, so the honest number is "tokens x list price", not a guess.
+// Family rates per million tokens. Override per family or per exact model id in config.json ->
+// "prices", e.g. {"prices": {"opus": {"in": 15, "out": 75}}} or {"prices": {"claude-opus-5-5": {...}}}.
+// Cache multipliers follow the published ones (write 1.25x input, read 0.1x), so a stale table only
+// needs the base pair corrected.
+export const PRICE_TABLE = {
+  opus:   { in: 15,   out: 75,  cacheWrite: 18.75, cacheRead: 1.5 },
+  sonnet: { in: 3,    out: 15,  cacheWrite: 3.75,  cacheRead: 0.3 },
+  haiku:  { in: 1,    out: 5,   cacheWrite: 1.25,  cacheRead: 0.1 },
+};
+export function priceFor(model, cfg) {
+  const m = String(model || '').toLowerCase();
+  const fam = Object.keys(PRICE_TABLE).find((f) => m.includes(f)) || 'sonnet';
+  const p = { ...PRICE_TABLE[fam] };
+  const over = (cfg && cfg.prices) || {};
+  Object.assign(p, over[fam] || {}, over[m] || {});
+  return { family: fam, ...p };
+}
+export function usageCost(usage, model, cfg) {
+  const p = priceFor(model, cfg);
+  const usd = ((usage.in || 0) * p.in + (usage.out || 0) * p.out
+    + (usage.cw || 0) * p.cacheWrite + (usage.cr || 0) * p.cacheRead) / 1e6;
+  return { usd, family: p.family, price: p };
+}
+export function newUsage() { return { in: 0, out: 0, cw: 0, cr: 0 }; }
+
+// Pull usage out of whatever just came through. A streaming answer carries it twice: message_start has
+// the input side (including the cache splits, which are what make an agent session's bill surprising)
+// and the last message_delta has the output count. Regex over frames rather than parsing the stream:
+// this runs on the hot path of a response we must not disturb, and a misread can only ever mean a
+// wrong number in `cla-gw cost`, never a broken answer.
+export function scanUsage(acc, text) {
+  for (const m of String(text).matchAll(/"usage"\s*:\s*\{[^{}]*\}/g)) {
+    let u = null;
+    try { u = JSON.parse(m[0].slice(m[0].indexOf('{'))); } catch { continue; }
+    if (typeof u.input_tokens === 'number') acc.in = u.input_tokens;
+    if (typeof u.output_tokens === 'number') acc.out = u.output_tokens;
+    if (typeof u.cache_creation_input_tokens === 'number') acc.cw = u.cache_creation_input_tokens;
+    if (typeof u.cache_read_input_tokens === 'number') acc.cr = u.cache_read_input_tokens;
+  }
+  return acc;
 }
 
 // /v1/messages and its satellites are inference. Everything else is not, and must not be re-signed.
