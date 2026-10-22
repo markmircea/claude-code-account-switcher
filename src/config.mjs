@@ -87,7 +87,15 @@ function parse(raw) {
   // streaming requests we can still recover: commit the stream, keep it alive with ping frames, and
   // forward for real when the window opens. Cap it so a chat is never parked past a plausible reset.
   if (cfg.holdStream === undefined) cfg.holdStream = true;
-  if (cfg.holdStreamMaxMs === undefined) cfg.holdStreamMaxMs = 6 * 3600_000;
+  // Measured, not guessed (2026-10-21 overnight, three chats, gateway log): a Claude Code client
+  // abandons a held-but-silent-then-pinged stream at ~911 s (15.2 min) - five aborts at 910.9-911.6 s,
+  // despite a ping every 20 s. Pings buy ~10 minutes over the ~5 min no-bytes timeout, and then the
+  // client's own patience ends it. So a ceiling above ~12 min is strictly harmful: the chat stalls for
+  // 15 minutes, the request is then lost, and because the client never saw a 429 on the first attempt
+  // it also never armed its own wait - which is the only mechanism that survives a multi-hour window.
+  // Park only waits short enough to actually deliver; longer ones must fail fast with an honest
+  // countdown so the client can arm.
+  if (cfg.holdStreamMaxMs === undefined) cfg.holdStreamMaxMs = 600_000;
   for (const a of cfg.accounts) {
     if (!a.label || !a.kind) throw new Error('each account needs {label, kind}');
     if (a.enabled === undefined) a.enabled = true;

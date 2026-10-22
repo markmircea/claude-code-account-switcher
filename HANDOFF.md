@@ -37,9 +37,11 @@ other. The rules are cheap; follow them.
     arms Claude Code's own wait.
   - `holdMaxMs: 15000` — raised from 240000 to a **small** silent hold. Now that the ping path exists
     and is proven, a minutes-long *silent* hold is the strictly riskier way to buy the same wait.
-  - `holdStreamMaxMs: 19800000` (**5.5 h**, was 6 h) — a 5 h window can be hours out, so park for it;
-    anything further out means the blocker is a **weekly** window, and a chat must not be parked for
-    days. Beyond the ceiling the real 429 passes through, as before.
+  - `holdStreamMaxMs: 600000` (**10 min**) — **cut down from 5.5 h on 2026-10-21 21:15 after the
+    overnight log.** The client abandons a held stream at **~900 s** (see the wall below). Parking a
+    chat past ~10 min therefore cannot deliver the answer, and it costs the client its own arm, which
+    is the only thing that survives a multi-hour window. Beyond the ceiling the real 429 passes
+    through immediately, with the pool-corrected countdown, so an interactive chat arms.
   - `secretHeader: x-gw-secret`, `swapInferenceOnly: true`.
 
 ## What is proven vs assumed
@@ -51,8 +53,10 @@ other. The rules are cheap; follow them.
 | Panel tolerates a held request (silent) | **proven at ~100 s**: hold 99 s → 200, no client abort; now capped at 15 s anyway, since the ping path below is better |
 | Panel tolerates a *long* held request kept alive by ping frames | **PROVEN 19:55 on 2.1.306** via `probe_long_hold.mjs`: held 236 926 ms and 695 421 ms, no abort, answer delivered on the same stream as a normal turn (`result is_error=false`) |
 | A hold survives past the client's own `x-stainless-timeout: 600` | **proven at 695 s** — that timeout is time-to-first-*response*, not time-to-first-token: once the gateway has committed 200 + a ping, the client keeps waiting. Do NOT read 600 s as the hold ceiling. |
+| **The wall: a hold longer than ~900 s is lost** | **MEASURED 2026-10-21 overnight** (real accounts, three live chats): five `hold-stream-abort` at **910.9–911.6 s** each, with a ping every 20 s running. The aborts are ~11 s after the hold began, so the timer is ~900 s from request start. 695 s survived; 911 s did not. Treat 900 s as hard. |
+| A parked chat then resumes itself at the reset | **DISPROVEN** — the overnight log: chats held from 20:38 (B opens 00:30, ~3.8 h out) were killed at ~15 min, retried once into a real 429, and then **zero requests after midnight**. Parking past the client's wall both loses the request *and* skips the arm the client would otherwise have made. This is why `holdStreamMaxMs` is 10 min now. |
 | The held panel chat still shows a limit notice | observed: the committed stream carries the refusal's (pool-corrected) quota headers, so the client emits `rate_limit_event` **and** completes the turn. Honest countdown, no dead turn. Keep an eye on it — if a future build lets that event end the turn, the hold breaks. |
-| A hold survives **hours**, VS Code closed, or a laptop sleeping through the reset | **UNPROVEN / presumed lost** — the ceiling allows 5.5 h but we have only measured 12 min, and a closed window or a sleep kills the socket (`hold-stream-abort`). Nothing gateway-side recovers those. |
+| A hold survives **hours**, VS Code closed, or a laptop sleeping through the reset | **DISPROVEN for hours** (see the ~900 s wall). A closed window or sleep still kills the socket (`hold-stream-abort`); nothing gateway-side recovers those. |
 | Quota shim: the client is told when the **pool** reopens, not the refusing account | **proven live**: C refused with its own 16:00 window, client was handed B's 14:20 |
 | Shim never lengthens a wait | proven by tests |
 
@@ -75,10 +79,10 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
 
 ## Open work
 
-1. **Long hold: shipped 19:55.** What is left is the tail nobody has measured — a hold of *hours*
-   (`--window 3000`+), and whether the panel behaves when the window is behind a sleep. Test it against
-   a real limit night rather than scheduling it: `probe_long_hold.mjs` is zero-quota, so a long one is
-   cheap, but it is only meaningful if a real chat is also parked that night.
+1. ~~Long hold: shipped 19:55; measure the tail (a hold of hours).~~ **ANSWERED, and it is a NO** —
+   the real night measured the tail for us: the client kills a held stream at ~900 s, and parking past
+   that loses the chat *and* the arm. Ceiling is now 10 min. See the wall row above. Do not raise
+   `holdStreamMaxMs` again without a measurement that beats 900 s.
 2. Surface the countdown in the VS Code status-bar extension (`vscode/`) during a hold — the gateway
    already sends `x-gw-held: <ms>`, and a chat parked for an hour with no visible reason is exactly
    what the status bar should be explaining.
@@ -103,6 +107,13 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
 - 19:25 — probe finished, stand-in stopped, **live config never touched** (`upstream` still
   `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
   Verdict below; it changes what the panel can and cannot get.
+
+- **21:15 — changed the LIVE config: `holdStreamMaxMs` 5.5 h → 600000 (10 min), and the code default
+  6 h → 10 min. No gateway restart needed (config is hot-reloaded per request).** Reason: the overnight
+  log, three real chats, five aborts at 910.9–911.6 s, then a real 429 on retry and **nothing after
+  midnight** — the 00:30 reset passed with zero requests. A 5.5 h ceiling converted a fast honest
+  refusal into a 15-minute stall followed by a lost turn. If you disagree, argue it with log lines, not
+  with the 695 s probe.
 
 ## VERDICT: does the extension panel arm the wait? No. Proven on 2.1.306.
 
@@ -166,10 +177,24 @@ same trap applies to them.
   every live chat on the machine — including the pi session, which itself routes through :8790 — keeps
   working untouched. Zero quota, no restart, restore on exit/watchdog.
 
+## Open work — current (21:15, after the overnight log) Not solvable gateway-side: the client's own socket
+   dies at ~900 s and the panel never arms. Options, none built yet:
+   - *Tell the user when the pool is back* so one `continue` typed at 00:30 finishes the job: the
+     gateway knows the exact epoch; a Windows toast / `msg` popup at reopen is ~20 lines. Cheapest win.
+   - Interactive (terminal) chats **do** cross it unattended — steer long overnight runs there.
+   - A gateway-side "park the turn, replay it at the reset" would need to re-inject an answer into a
+     client that has already ended the turn. Not possible through this client; do not build it.
+2. Surface the countdown in the VS Code status-bar extension (`vscode/`) during a hold — the gateway
+   already sends `x-gw-held: <ms>`.
+3. C's token was pasted into a chat once; rotation was offered and declined for now. Re-raise if the
+   account is ever shared or the machine is.
+
 ## CLAIMS
 
 | file | who | since | status |
 |---|---|---|---|
 | `src/gw.mjs`, `src/config.mjs`, `src/probe_hold.mjs`, `src/test_quota_surface.mjs` | pi session (this board's author) | 18:05 | released — committed |
+| `src/config.mjs` (holdStreamMaxMs default + why), `HANDOFF.md`, live `config.json` (ceiling → 10 min) | pi session | 21:12 | released — committed |
+
 | `HANDOFF.md` (probe write-up), `.probe/probe-settings.json` | pi session | 18:40 | released — probe over, stand-in stopped, live config untouched |
 | `src/probe_upstream.mjs`, `src/probe_long_hold.mjs` | pi session | 19:40 | released — committed; harness is zero-quota and never touches live config |
