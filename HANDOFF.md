@@ -256,3 +256,4 @@ same trap applies to them.
 | `HANDOFF.md` (probe write-up), `.probe/probe-settings.json` | pi session | 18:40 | released — probe over, stand-in stopped, live config untouched |
 | `src/probe_upstream.mjs`, `src/probe_long_hold.mjs` | pi session | 19:40 | released — committed; harness is zero-quota and never touches live config |
 | `src/preflight.mjs` (new), `src/add.mjs`, live `config.json` (D disabled) | pi session (second window) | 12:25 | released — committed; `cla-gw check` added, 36 checks green, D disabled not deleted |
+| `src/vault.mjs`, `src/notify.mjs`, `src/activate.mjs`, `src/cli.mjs`, `src/add.mjs`, `vscode/` (Linux port: platform branches only, Windows paths unchanged) | Claude (linux-port session, worktree `../claude-gw-linux`) | 10-23 00:40 | CLAIMED |
