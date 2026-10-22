@@ -18,8 +18,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { DATA_DIR, loadConfig, saveConfig, HOME } from './config.mjs';
-import { vaultPut, vaultPath } from './vault.mjs';
+import { vaultPut, vaultPath, vaultRm } from './vault.mjs';
 import { describeIdentity } from './creds.mjs';
+import { probeInference } from './preflight.mjs';
 
 const TOKEN_RE = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_\-]{16,}/;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || path.join(HOME, '.local', 'bin', 'claude.exe');
@@ -198,6 +199,24 @@ If the browser showed an error after authorising, the callback did not reach the
   vaultPut(label, token);
   const ident = await identify(token);
 
+  // Ask the credential to do the job before letting it into rotation. A token can parse, authenticate
+  // against /api/oauth/*, and still be unable to serve a single inference request — on 2026-10-22 the
+  // new account answered everything with `400 ...accept them in claude.ai...` because its Consumer
+  // Terms had not been accepted. Enrolled as-is, it became the only unparked account in the pool, so
+  // selection sent every chat on the machine to it. See src/preflight.mjs for why this has to be a real
+  // (1-token) completion rather than count_tokens.
+  process.stdout.write('\nprobing inference with the new credential (one 1-token request)...\n');
+  const pre = await probeInference(token);
+  if (pre.verdict === 'token-rejected') {
+    vaultRm(label);
+    console.log(`\nNOT ADDED: upstream rejected this token (HTTP ${pre.status}) - ${pre.detail}`);
+    console.log('Nothing was enrolled and the vault entry was removed. Re-run cla-gw add with a fresh setup-token.');
+    return 1;
+  }
+  // Anything the pool cannot route around by waiting: enrol it switched OFF, so it cannot black-hole
+  // chats, and say exactly what a human has to do to switch it on.
+  const unusable = pre.ok === false;
+
   const known = [];
   try {
     const g = JSON.parse(fs.readFileSync(path.join(HOME, '.claude.json'), 'utf8'));
@@ -217,16 +236,26 @@ If the browser showed an error after authorising, the callback did not reach the
     label,
     kind: 'vault',
     vaultRef: label,
-    enabled: true,
+    enabled: !unusable,
     addedAt: Date.now(),
     expiresAt: Date.now() + YEAR_MS,
     identity: ident ? { uuid: ident.uuid, email: ident.email } : null,
-    note: 'setup-token: inference-only, 1 year, no refresh',
+    note: unusable ? `setup-token: inference-only, 1 year, no refresh — NOT SERVING (${pre.verdict})`
+                   : 'setup-token: inference-only, 1 year, no refresh',
   });
   saveConfig(cfg);
 
   console.log(`\nvaulted: ${vaultPath(label)}`);
   console.log(verdict);
+  console.log(`inference probe: ${pre.verdict}${pre.status ? ` (HTTP ${pre.status})` : ''} - ${pre.detail}`);
+  if (pre.verdict === 'limited-now') {
+    console.log('note: this account is OUT OF USAGE right now. It is enrolled, but expect it to be parked until its window resets.');
+  }
+  if (unusable) {
+    console.log(`\nENROLLED BUT DISABLED — this account cannot serve a single request yet.`);
+    console.log(`It was added with enabled:false; the gateway would otherwise have routed chats to it and lost them.`);
+    console.log(`Fix it, then: cla-gw enable ${label}`);
+  }
   console.log(`\nrotation now:`);
   console.log(rotationReport(cfg));
   console.log(`\nTakes effect on the next request (config is re-read per request). Expires in ~365 days.`);

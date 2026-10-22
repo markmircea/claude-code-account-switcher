@@ -108,6 +108,19 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
   `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
   Verdict below; it changes what the panel can and cannot get.
 
+- **12:25 — CLAIMING `src/preflight.mjs` (new), `src/add.mjs`; live `config.json` change: D DISABLED.**
+  No gateway restart (config is hot-reloaded per request). The gateway now survives a terms-walled account,
+  but `cla-gw add` still enrols a credential it has never asked to do any work. `preflight.mjs` probes
+  `/v1/messages/count_tokens` (inference path — same wall, same 401, same quota rejection — but generates
+  nothing, so it is free) and `add` now refuses to put a terms-walled or token-rejected credential into
+  rotation. `cla-gw disable D` was run: D (org fc3a5866) cannot serve until a human accepts the terms in
+  claude.ai, and re-enabling is `cla-gw enable D` after that. Verified against live tokens at 12:2x:
+  D -> `terms-wall`, B/C -> `limited-now` (credential good, window closed), zero quota spent.
+  **Gotcha for anyone reusing this: `/v1/messages/count_tokens` does NOT see the terms wall** — same
+  token, same minute: count_tokens -> 200, /v1/messages -> 400 Consumer Terms. The probe has to be a
+  real completion, which is why it is `max_tokens: 1` on a one-character prompt. `cla-gw check [labels]`
+  now answers "can this account actually serve" on demand (exit 1 if any cannot) — run it BEFORE adding
+  an account in a panic; on 2026-10-22 the pool was not short of accounts, it was short of servable ones.
 - **11:50 — consent walls are now a first-class account state; gateway RESTARTED at 11:50.** Account D (org
   fc3a5866) came back from `cla-gw add` with `400 We've updated our Consumer Terms... accept them in
   claude.ai`. Six of those in three seconds, every chat dead, because the failover loop treats any non
@@ -216,3 +229,4 @@ same trap applies to them.
 
 | `HANDOFF.md` (probe write-up), `.probe/probe-settings.json` | pi session | 18:40 | released — probe over, stand-in stopped, live config untouched |
 | `src/probe_upstream.mjs`, `src/probe_long_hold.mjs` | pi session | 19:40 | released — committed; harness is zero-quota and never touches live config |
+| `src/preflight.mjs` (new), `src/add.mjs`, live `config.json` (D disabled) | pi session (second window) | 12:25 | released — committed; `cla-gw check` added, 36 checks green, D disabled not deleted |

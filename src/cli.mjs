@@ -15,6 +15,7 @@ import { resolveBearer, describeIdentity } from './creds.mjs';
 import { addAccount } from './add.mjs';
 import { vaultLs, vaultRm } from './vault.mjs';
 import { activate, deactivate, doctor, runWithoutGateway } from './activate.mjs';
+import { preflightAccount } from './preflight.mjs';
 
 const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const argv = process.argv.slice(2);
@@ -198,6 +199,28 @@ async function main() {
       return;
     }
 
+    case 'check': {
+      // Live probe: not "does the token parse" but "can this account answer a request". `health` reads
+      // headers we happened to see on past traffic; this asks upstream now, at one token per account.
+      // Worth running before `add`ing another account in a panic — the 2026-10-22 pool was not short of
+      // accounts, it was short of SERVABLE ones, and the new one was dead on arrival.
+      const want = argv.slice(1).filter((a) => !a.startsWith('--'));
+      const targets = want.length ? cfg.accounts.filter((a) => want.includes(a.label)) : cfg.accounts;
+      if (!targets.length) { console.log(`no such account(s): ${want.join(', ')}\npool: ${cfg.accounts.map((a) => a.label).join(', ')}`); process.exitCode = 2; return; }
+      console.log(`probing ${targets.map((a) => a.label).join(', ')} against ${cfg.upstream} (one 1-token request each)`);
+      const results = await Promise.all(targets.map(async (a) => ({ label: a.label, r: await preflightAccount(a, cfg.upstream) })));
+      let bad = 0;
+      for (const { label, r } of results) {
+        const acc = cfg.accounts.find((a) => a.label === label);
+        if (!r.ok) bad++;
+        console.log(`  ${r.ok ? 'ok  ' : 'FIX '} ${label}${acc?.enabled === false ? ' (DISABLED in pool)' : ''}: ${r.verdict}${r.detail ? ` - ${r.detail}` : ''}`);
+        if (r.verdict === 'terms-wall') console.log(`       -> sign in to claude.ai with this account's email (org ${readAccountState()[label]?.org || acc?.identity?.org || '?'}) and accept the terms, then: cla-gw enable ${label}`);
+      }
+      console.log(bad ? `\n${bad} account(s) cannot serve at all right now. Waiting will not fix a terms wall.` : '\nall probed accounts can serve inference');
+      process.exitCode = bad ? 1 : 0;
+      return;
+    }
+
     case 'add': {
       const label = argv[1];
       if (!label) { console.log('usage: cla-gw add <label> [--paste | --auto]'); return; }
@@ -290,7 +313,7 @@ Re-run with --yes if you really mean deletion.`);
     }
 
     default:
-      console.log('usage: cla-gw start | stop | status | health | doctor | activate [--legacy|--no-startup] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
+      console.log('usage: cla-gw start | stop | status | health | check [labels] | doctor | activate [--legacy|--no-startup] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
       console.log('       use <label>|none | enable <label> | disable <label> | env | clear-env | statusline');
   }
 }
