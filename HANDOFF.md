@@ -108,6 +108,14 @@ node src/probe_long_hold.mjs --window 700        # real scale; nothing live is t
   `https://api.anthropic.com`, `holdStream` still `false`, no `hold-config.json`), no restart.
   Verdict below; it changes what the panel can and cannot get.
 
+- **11:35 — notify.mjs rewritten (popup is now the primary path) + gateway RESTARTED at 11:36 to load it.**
+  `cla-gw notify` printed "sent via toast" while showing nothing: the WinRT toast path returns exit 0 when
+  Windows silently drops an unregistered-AUMID notification, so it cannot be trusted to mean "seen". Now:
+  our own tiny topmost popup (one powershell, no install, auto-close 9 s, click to dismiss, named mutex so
+  five chats = one box), toast and balloon demoted to fallbacks. Also wired the reopen alert: a refusal now
+  schedules `open-alert` in the log and pops "B is back (HH:MM) - type continue" at the epoch the client was
+  given. Tests set `CLAUDE_GW_NO_NOTIFY=1` (test_quota_surface was missing it and would have popped boxes
+  during the refusal cases). 31 checks.
 - **21:15 — changed the LIVE config: `holdStreamMaxMs` 5.5 h → 600000 (10 min), and the code default
   6 h → 10 min. No gateway restart needed (config is hot-reloaded per request).** Reason: the overnight
   log, three real chats, five aborts at 910.9–911.6 s, then a real 429 on retry and **nothing after

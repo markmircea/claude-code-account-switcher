@@ -14,7 +14,7 @@ import { Readable } from 'node:stream';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { loadConfig, saveConfig, pickAccount, pool, availability, setModelGate, classify429, LOG_PATH, PID_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState, writeAccountState, poolOpening, poolQuotaShim, applyQuotaShim, isInferencePath } from './config.mjs';
-import { notifySwitch } from './notify.mjs';
+import { notifySwitch, notifyPoolOpen } from './notify.mjs';
 import { resolveBearer, describeIdentity } from './creds.mjs';
 
 const HOP_BY_HOP = new Set([
@@ -203,6 +203,29 @@ function allowedHost(h, port) {
   if (!h) return false;
   const host = String(h).toLowerCase().replace(/:\d+$/, '');
   return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1';
+}
+
+// One alert per pool opening. A chat refused at the limit does not wake itself up - headless sessions
+// never arm, and interactive ones that were parked past the client's ~900 s wall lost the arm too - so
+// the least the gateway can do is say the exact second it can be continued. One alert per opening;
+// state is re-checked before speaking, so a window that moved late stays quiet (the next refusal
+// re-schedules for the new epoch).
+let openAlertEpoch = 0;
+function scheduleOpenAlert(cfg, shim) {
+  const epochSec = shim?.readyEpochSec;
+  if (!epochSec) return;
+  const delay = epochSec * 1000 - Date.now() + 5000;
+  if (delay <= 0 || delay > 24 * 3600_000) return; // already open, or implausibly far out
+  if (epochSec === openAlertEpoch) return;
+  openAlertEpoch = epochSec;
+  logLine({ ts: Date.now(), event: 'open-alert', at: epochSec, inMs: delay });
+  const timer = setTimeout(() => {
+    if (epochSec === openAlertEpoch) openAlertEpoch = 0;
+    reloadStateIfChanged();
+    const open = poolOpening(cfg, accountState, Date.now());
+    if (!open || open.readyAt <= Date.now() + 60_000) notifyPoolOpen(open?.label || 'the pool', new Date(epochSec * 1000));
+  }, delay);
+  if (typeof timer.unref === 'function') timer.unref();
 }
 
 // Headers forwarded upstream: drop hop-by-hop and the client's credential, keep everything else
@@ -525,6 +548,10 @@ async function handle(req, res) {
   if (up.status === 429) {
     shim = poolQuotaShim(cfg, accountState, sel.account.label, Date.now());
     applyQuotaShim(out, shim);
+    // A chat refused here usually just stops with its turn over - nothing retries it, and the user is
+    // asleep. The gateway knows the exact epoch the pool reopens, so it says so when it happens.
+    // One alert per opening, and it checks the state again before speaking.
+    scheduleOpenAlert(cfg, shim);
   }
 
   const ttfb = Date.now() - t0;

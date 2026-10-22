@@ -17,6 +17,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { poolOpening, poolQuotaShim, isInferencePath } from './config.mjs';
 
+process.env.CLAUDE_GW_NO_NOTIFY = '1'; // the refusal cases below would otherwise pop a box on the user's screen
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DATA = path.join(HERE, '..', '.probe', 'testdata');
 const GW_PORT = 8795;
@@ -184,6 +186,8 @@ async function main() {
     ok(r.headers.get('anthropic-ratelimit-unified-5h-status') === 'rejected', 'statuses stay honest (still a limit)',
       String(r.headers.get('anthropic-ratelimit-unified-5h-status')));
     const logs = readLog();
+    ok(logs.some((l) => l.event === 'open-alert' && l.at > Math.floor(Date.now() / 1000)),
+       'a reopen alert is scheduled for the epoch the client was told');
     const shimRec = logs.find((l) => l.quotaShim);
     ok(!!shimRec, 'the shim is recorded in the log (auditable, not silent)',
       shimRec ? `via ${shimRec.quotaShim.via}, refusedReadyAt ${new Date(shimRec.quotaShim.refusedReadyAt).toLocaleTimeString()}` : '');
