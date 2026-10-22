@@ -18,12 +18,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { DATA_DIR, loadConfig, saveConfig, HOME } from './config.mjs';
-import { vaultPut, vaultPath, vaultRm } from './vault.mjs';
+import { vaultPut, vaultPath, vaultRm, vaultLs } from './vault.mjs';
 import { describeIdentity } from './creds.mjs';
 import { probeInference } from './preflight.mjs';
 
 const TOKEN_RE = /sk-ant-oat[0-9]{2}-[A-Za-z0-9_\-]{16,}/;
-const CLAUDE_BIN = process.env.CLAUDE_BIN || path.join(HOME, '.local', 'bin', 'claude.exe');
+const CLAUDE_BIN = process.env.CLAUDE_BIN || path.join(HOME, '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
 const YEAR_MS = 365 * 86400000;
 const stripAnsi = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 
@@ -55,9 +55,7 @@ function rotationReport(cfg) {
     }
   } catch { signedIn = '  CLI + VS Code extension (shared ~/.claude): could not read ~/.claude.json'; }
 
-  const vault = fs.existsSync(path.join(DATA_DIR, 'vault'))
-    ? fs.readdirSync(path.join(DATA_DIR, 'vault')).filter((f) => f.endsWith('.dpapi')).map((f) => f.replace(/\.dpapi$/, ''))
-    : [];
+  const vault = vaultLs();
   return (rows.length ? rows.join('\n') : '  (no accounts in the rotation yet)') +
     '\n' + signedIn +
     `\n  vault tokens held: ${vault.length ? vault.join(', ') : '(none)'}`;

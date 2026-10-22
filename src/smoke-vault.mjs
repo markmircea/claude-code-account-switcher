@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig, saveConfig, STATUS_PATH } from './config.mjs';
-import { vaultPut, vaultGet, vaultLs, vaultRm } from './vault.mjs';
+import { vaultPut, vaultGet, vaultLs, vaultRm, vaultPath } from './vault.mjs';
 
 let fail = 0;
 const ok = (n, c, d = '') => { console.log(`${c ? 'PASS' : 'FAIL'}  ${n}${d ? `  - ${d}` : ''}`); if (!c) fail++; };
@@ -16,11 +16,20 @@ const label = 'zz-smoke-tmp';
 try { vaultRm(label); } catch {}
 vaultPut(label, CANARY);
 const got = vaultGet(label);
-ok('vault round-trip (DPAPI)', got.token === CANARY, got.err || '');
+ok(`vault round-trip (${process.platform === 'win32' ? 'DPAPI' : 'private file'})`, got.token === CANARY, got.err || '');
 ok('vault cached on second read', vaultGet(label).cached === true);
-const file = path.join(process.env.LOCALAPPDATA, 'claude-gw', 'vault', `${label}.dpapi`);
-const raw = fs.readFileSync(file, 'utf8');
-ok('vault file holds no plaintext token', !raw.includes('sk-ant') && !raw.includes('canary'), `len=${raw.length}`);
+const file = vaultPath(label);
+if (process.platform === 'win32') {
+  const raw = fs.readFileSync(file, 'utf8');
+  ok('vault file holds no plaintext token', !raw.includes('sk-ant') && !raw.includes('canary'), `len=${raw.length}`);
+} else {
+  // Linux stores the token as a file only this user can read; widening it must make the vault refuse it.
+  const mode = fs.statSync(file).mode & 0o777;
+  ok('vault file is private (0600)', mode === 0o600, mode.toString(8));
+  fs.chmodSync(file, 0o644);
+  ok('a group/world-readable vault file is refused', !!vaultGet(label).err);
+  fs.chmodSync(file, 0o600);
+}
 ok('vault listed', vaultLs().includes(label));
 vaultRm(label);
 ok('vault removed', !vaultLs().includes(label));

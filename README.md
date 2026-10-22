@@ -95,6 +95,24 @@ node src/cli.mjs run -- -p "hi"
 
 **Deleting the three variables is the kill switch**; `deactivate` does it for you.
 
+## Linux
+
+Same code, same commands. `cla-gw activate` / `deactivate` / `doctor` branch on the platform:
+
+| | Windows | Linux |
+|---|---|---|
+| data dir | `%LOCALAPPDATA%\claude-gw` | `~/.local/share/claude-gw` |
+| vault | DPAPI blob, `<label>.dpapi` | `<label>.token`, mode 0600 in a 0700 dir; refused if it is ever widened. Not libsecret: the gateway starts before a keyring is unlocked |
+| user-scope env | `HKCU\Environment` | `~/.config/environment.d/90-claude-gw.conf` (desktop session; SSH shells do not read it) |
+| autostart | Startup folder `claude-gw.cmd` | systemd user unit `claude-gw.service`, `Restart=on-failure`: a crashed gateway comes back by itself |
+| notifications | topmost popup | `notify-send` (needs a desktop session; silently skipped over SSH) |
+
+What actually points Claude Code at the gateway is the `env` block in `~/.claude/settings.json`, which the
+CLI and the VS Code panel both obey, so on Linux **Developer: Reload Window** plus a new `claude` is all it
+takes. While the unit is installed, `cla-gw start|stop` go through `systemctl --user`; logs are in
+`journalctl --user -u claude-gw` as well as `gateway.jsonl`. The status-bar extension (0.3.0+) finds the
+Linux data dir; put `cla-gw` on `PATH` (e.g. `~/.local/bin/cla-gw` -> `src/cli.mjs`) so its click works.
+
 ## Credentials: who owns what
 
 | Account | Credential | Refreshed by |
