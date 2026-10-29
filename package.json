@@ -1,0 +1,17 @@
+{
+  "name": "claude-gw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local gateway for Claude Code that serves requests from a pool of your Claude accounts and moves to another account when one hits its usage limit.",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "git+https://github.com/markmircea/claude-gw.git" },
+  "bin": { "cla-gw": "src/cli.mjs" },
+  "scripts": {
+    "start": "node src/cli.mjs start",
+    "status": "node src/cli.mjs status",
+    "test": "node src/test_selection.mjs && node src/test_routing_rules.mjs && node src/test_costing.mjs && node src/test_config_safety.mjs && node src/test_quota_surface.mjs && node src/test_statusbar.mjs && node src/test_sticky.mjs && node src/test_switch_cli.mjs",
+    "smoke": "node src/smoke.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
