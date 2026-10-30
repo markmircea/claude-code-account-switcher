@@ -14,7 +14,7 @@ import { ensureConfig, loadConfig, saveConfig, pool, availability, poolReopening
 import { resolveBearer, describeIdentity } from './creds.mjs';
 import { addAccount } from './add.mjs';
 import { vaultLs, vaultRm } from './vault.mjs';
-import { activate, deactivate, doctor, runWithoutGateway } from './activate.mjs';
+import { activate, deactivate, doctor, runWithoutGateway, serviceInstalled, systemctl, UNIT_NAME } from './activate.mjs';
 import { preflightAccount } from './preflight.mjs';
 import { auditRouting } from './audit_routing.mjs';
 import { priceFor, familyOf, PRICES, PRICES_AS_OF, ratesInPlay, WEB_SEARCH_USD_PER_REQUEST, classifyCostRows } from './config.mjs';
@@ -91,6 +91,20 @@ async function main() {
 
   switch (cmd) {
     case 'start': {
+      if (serviceInstalled()) {
+        // Linux with the systemd unit: systemd owns the process, and restarts it if it crashes.
+        if (await getStatus(cfg) && !systemctl('is-active', UNIT_NAME).ok) {
+          console.log('a gateway started outside systemd is already answering; leaving it. Hand it over with: cla-gw stop && cla-gw start');
+          return;
+        }
+        const s = systemctl('start', UNIT_NAME);
+        await new Promise((r) => setTimeout(r, 1200));
+        const st = await getStatus(cfg);
+        if (!s.ok) console.log(`systemctl --user start ${UNIT_NAME} failed: ${s.out}`);
+        else console.log(st ? `running (systemd ${UNIT_NAME}); pool: ${st.pool.join(', ')}` : `systemd started ${UNIT_NAME} but nothing answers - journalctl --user -u ${UNIT_NAME}`);
+        console.log(`log: ${LOG_PATH}`);
+        return;
+      }
       if (fs.existsSync(PID_PATH) && await getStatus(cfg)) {
         console.log(`already running (pid ${fs.readFileSync(PID_PATH, 'utf8').trim()})`);
         return;
@@ -107,6 +121,11 @@ async function main() {
     }
 
     case 'stop': {
+      if (serviceInstalled() && systemctl('is-active', UNIT_NAME).ok) {
+        const s = systemctl('stop', UNIT_NAME);
+        console.log(s.ok ? `stopped (systemd ${UNIT_NAME}; it starts again at next login - cla-gw deactivate removes it)` : `systemctl --user stop failed: ${s.out}`);
+        return;
+      }
       if (!fs.existsSync(PID_PATH)) { console.log('not running (no pid file)'); return; }
       const pid = Number(fs.readFileSync(PID_PATH, 'utf8').trim());
       try { process.kill(pid); console.log(`stopped pid ${pid}`); }
@@ -588,6 +607,15 @@ Re-run with --yes if you really mean deletion.`);
       // not an Anthropic credential. It still should not end up committed or pasted into logs.
       // NOTE the deliberate absence of ANTHROPIC_AUTH_TOKEN: setting it makes Claude Code treat the
       // session as a billed-API session and switch off auto-continue at the usage limit.
+      if (process.platform !== 'win32') {
+        console.log('# bash/zsh - Claude Code itself reads the env block in ~/.claude/settings.json; this is for one shell.');
+        console.log('# Remove with: eval "$(cla-gw clear-env)"');
+        console.log('export CLAUDE_CODE_USE_GATEWAY=1');
+        console.log(`export ANTHROPIC_BASE_URL="http://${cfg.host}:${cfg.port}"`);
+        console.log(`export ANTHROPIC_CUSTOM_HEADERS="${(cfg.secretHeader || 'x-gw-secret')}: ${cfg.secret}"`);
+        console.log('unset ANTHROPIC_AUTH_TOKEN   # must stay unset');
+        return;
+      }
       console.log('# PowerShell — sets the gateway for BOTH the CLI and the VS Code extension (D-6).');
       console.log('# Remove with: cla-gw clear-env  (then restart the shell / VS Code)');
       console.log(`$env:CLAUDE_CODE_USE_GATEWAY = "1"`);
@@ -598,6 +626,10 @@ Re-run with --yes if you really mean deletion.`);
     }
 
     case 'clear-env': {
+      if (process.platform !== 'win32') {
+        console.log('unset CLAUDE_CODE_USE_GATEWAY ANTHROPIC_BASE_URL ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_AUTH_TOKEN');
+        return;
+      }
       console.log('# PowerShell');
       console.log('Remove-Item Env:CLAUDE_CODE_USE_GATEWAY,Env:ANTHROPIC_BASE_URL,Env:ANTHROPIC_CUSTOM_HEADERS,Env:ANTHROPIC_AUTH_TOKEN -ErrorAction SilentlyContinue');
       return;

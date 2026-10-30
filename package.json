@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local gateway for Claude Code that serves requests from a pool of your Claude accounts and moves to another account when one hits its usage limit.",
+  "description": "Auto-switch Claude Code between your Claude accounts when one hits its usage limit, and auto-continue the chat. Local gateway, Windows and Linux, zero dependencies.",
   "license": "Apache-2.0",
-  "repository": { "type": "git", "url": "git+https://github.com/markmircea/claude-gw.git" },
+  "repository": { "type": "git", "url": "git+https://github.com/markmircea/claude-code-account-switcher.git" },
   "bin": { "cla-gw": "src/cli.mjs" },
   "scripts": {
     "start": "node src/cli.mjs start",

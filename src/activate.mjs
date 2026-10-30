@@ -25,6 +25,33 @@ import { resolveBearer, describeIdentity } from './creds.mjs';
 
 const CLAUDE_HOME = process.env.CLAUDE_CONFIG_DIR || path.join(process.env.USERPROFILE || process.env.HOME || '', '.claude');
 
+const IS_WIN = process.platform === 'win32';
+const XDG_CONFIG = process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || '', '.config');
+// Linux has no "user-scope environment". The nearest thing is systemd's environment.d: the user manager
+// reads it, and through it the graphical session on GNOME/KDE, so a VS Code started from the desktop gets
+// the vars. SSH shells do not read it. That is fine: the settings.json env block (applySettingsEnv) is
+// what Claude Code itself obeys, whatever process started it.
+export const ENV_D_PATH = path.join(XDG_CONFIG, 'environment.d', '90-claude-gw.conf');
+// Linux autostart is a systemd --user unit rather than the Startup folder. Restart=on-failure also brings
+// a crashed gateway back, which the Windows Startup entry cannot do; a deliberate stop stays stopped.
+export const UNIT_NAME = 'claude-gw.service';
+export const UNIT_PATH = path.join(XDG_CONFIG, 'systemd', 'user', UNIT_NAME);
+
+export function systemctl(...args) {
+  const r = spawnSync('systemctl', ['--user', ...args], { encoding: 'utf8', timeout: 30000 });
+  return { ok: r.status === 0, out: `${r.stdout || ''}${r.stderr || ''}`.trim() };
+}
+
+// Linux with the unit file present: start/stop must then go through systemd, or a gateway it supervises
+// gets restarted behind our back, or a second copy fights it for the port.
+export function serviceInstalled() {
+  return !IS_WIN && fs.existsSync(UNIT_PATH);
+}
+
+function readEnvD() {
+  try { return fs.readFileSync(ENV_D_PATH, 'utf8').split('\n'); } catch { return []; }
+}
+
 // Supported mode: the local secret travels in a HEADER, and ANTHROPIC_AUTH_TOKEN is deliberately
 // NOT set. That variable is a "gateway credential" as far as Claude Code is concerned, and while it
 // is set the client treats itself as a billed-API session and turns off its own "wait for the
@@ -47,6 +74,11 @@ function ps(script) {
 }
 
 export function readUserVar(name) {
+  if (!IS_WIN) {
+    const line = readEnvD().find((l) => l.startsWith(`${name}=`));
+    if (!line) return null;
+    return line.slice(name.length + 1).replace(/^"(.*)"$/, '$1') || null;
+  }
   try { return ps(`[Environment]::GetEnvironmentVariable('${name}','User')`) || null; } catch { return null; }
 }
 
@@ -58,6 +90,17 @@ export function setUserVar(name, value) {
   }
   if (value !== null && /["'`&|<>^%$\\]/.test(String(value))) {
     throw new Error(`refusing to write env value with shell metacharacters for ${name}`);
+  }
+  if (!IS_WIN) {
+    // The guards above already refuse quotes and shell metacharacters, so double-quoting is safe.
+    const keep = readEnvD().filter((l) => l.trim() && !l.startsWith('#') && !l.startsWith(`${name}=`));
+    if (value !== null) keep.push(`${name}="${value}"`);
+    if (!keep.length) { fs.rmSync(ENV_D_PATH, { force: true }); return; }
+    fs.mkdirSync(path.dirname(ENV_D_PATH), { recursive: true });
+    // It carries the local gateway secret, so it is private like config.json.
+    fs.writeFileSync(ENV_D_PATH, ['# claude-gw: written by `cla-gw activate`, removed by `cla-gw deactivate`.', ...keep, ''].join('\n'), { mode: 0o600 });
+    fs.chmodSync(ENV_D_PATH, 0o600);
+    return;
   }
   const v = value === null ? '$null' : `'${value}'`;
   ps(`[Environment]::SetEnvironmentVariable('${name}', ${v}, 'User')`);
@@ -124,9 +167,31 @@ function settingsEnvState(cfg, legacy = false) {
 function startupDir() {
   return ps("[Environment]::GetFolderPath('Startup')");
 }
-function startupCmdPath() { return path.join(startupDir(), 'claude-gw.cmd'); }
+function startupCmdPath() { return IS_WIN ? path.join(startupDir(), 'claude-gw.cmd') : UNIT_PATH; }
 
 function installStartup() {
+  if (!IS_WIN) {
+    fs.mkdirSync(path.dirname(UNIT_PATH), { recursive: true });
+    fs.writeFileSync(UNIT_PATH, [
+      '# claude-gw: the local account gateway, started at login. Remove with: cla-gw deactivate',
+      '[Unit]',
+      'Description=claude-gw local Claude account gateway',
+      '',
+      '[Service]',
+      'Type=simple',
+      `ExecStart="${process.execPath}" "${path.join(HERE, 'gw.mjs')}"`,
+      'Restart=on-failure',
+      'RestartSec=3',
+      '',
+      '[Install]',
+      'WantedBy=default.target',
+      '',
+    ].join('\n'));
+    systemctl('daemon-reload');
+    const en = systemctl('enable', UNIT_NAME);
+    if (!en.ok) throw new Error(`systemctl --user enable ${UNIT_NAME} failed: ${en.out}`);
+    return UNIT_PATH;
+  }
   const p = startupCmdPath();
   fs.mkdirSync(path.dirname(p), { recursive: true });
   fs.writeFileSync(p, [
@@ -139,6 +204,13 @@ function installStartup() {
 }
 
 function removeStartup() {
+  if (!IS_WIN) {
+    const existed = fs.existsSync(UNIT_PATH);
+    if (existed) systemctl('disable', '--now', UNIT_NAME);
+    fs.rmSync(UNIT_PATH, { force: true });
+    systemctl('daemon-reload');
+    return { p: UNIT_PATH, existed };
+  }
   const p = startupCmdPath();
   const existed = fs.existsSync(p);
   fs.rmSync(p, { force: true });
@@ -202,7 +274,7 @@ export async function activate({ noStartup = false, legacy = false } = {}) {
     // Its mere presence switches auto-resume off, so remove it even if it was set by something else.
     setUserVar('ANTHROPIC_AUTH_TOKEN', null);
   }
-  console.log(`env:     ${(legacy ? LEGACY_VARS : GW_VARS).join(', ')} set at USER scope`);
+  console.log(`env:     ${(legacy ? LEGACY_VARS : GW_VARS).join(', ')} ${IS_WIN ? 'set at USER scope' : `written to ${ENV_D_PATH}`}`);
 
   // ...and in Claude Code's own env block, which is what lets a long-running VS Code pick the mode up
   // on a Reload Window instead of needing a full quit.
@@ -213,7 +285,16 @@ export async function activate({ noStartup = false, legacy = false } = {}) {
 
   // Start it now so the vars are not pointing at a dead port.
   const before = await gwStatus(cfg);
-  if (!before) {
+  if (serviceInstalled()) {
+    // A gateway started by hand would hold the port and make the unit crash-loop: hand it to systemd.
+    if (before && !systemctl('is-active', UNIT_NAME).ok) {
+      spawnSync(process.execPath, [path.join(HERE, 'cli.mjs'), 'stop'], { stdio: 'ignore' });
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    const s = systemctl('start', UNIT_NAME);
+    if (!s.ok) console.log(`systemd: start failed: ${s.out}`);
+    await new Promise((r) => setTimeout(r, 1500));
+  } else if (!before) {
     const child = spawn(process.execPath, [path.join(HERE, 'gw.mjs')],
       { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();
@@ -224,7 +305,8 @@ export async function activate({ noStartup = false, legacy = false } = {}) {
 
   const s = poolState();
   console.log(`\naccounts right now:\n${s}`);
-  console.log(`
+  if (IS_WIN) {
+    console.log(`
 ACTIVATED. Two things you must do, in this order:
   1. Quit VS Code completely (not just close the window) and start it again.
      Already-running processes keep the old environment; that is the usual "it didn't work".
@@ -232,6 +314,16 @@ ACTIVATED. Two things you must do, in this order:
 Roll back with: cla-gw deactivate   (removes vars, startup entry, stops gateway)
 Roll back to the OLD credential model (auto-resume off): cla-gw activate --legacy
 Note: user-scope ANTHROPIC_BASE_URL affects every process you start, not just Claude Code.`);
+  } else {
+    console.log(`
+ACTIVATED. What to do now:
+  1. VS Code: run "Developer: Reload Window". Claude Code reads the env block in ~/.claude/settings.json.
+  2. Terminal: start a new \`claude\`. Sessions already running keep the old settings until restarted.
+  3. Other desktop apps get the environment.d vars at your next login (Claude Code does not need them).
+The gateway runs as the systemd user unit claude-gw.service and restarts itself if it crashes:
+  systemctl --user status claude-gw    journalctl --user -u claude-gw
+Roll back with: cla-gw deactivate   (removes the vars, the unit, stops the gateway)`);
+  }
 }
 
 export async function deactivate() {
@@ -249,7 +341,7 @@ export async function deactivate() {
   } catch (e) { console.log(`settings: could not clean ${settingsPath()} (${e.message}) - remove its ANTHROPIC_* env keys yourself`); }
   const r = removeStartup();
   spawnSync(process.execPath, [path.join(HERE, 'cli.mjs'), 'stop'], { stdio: 'ignore' });
-  console.log(`env:     ${ALL_VARS.join(', ')} removed from USER scope`);
+  console.log(`env:     ${ALL_VARS.join(', ')} ${IS_WIN ? 'removed from USER scope' : `removed from ${ENV_D_PATH}`}`);
   console.log(`startup: ${r.existed ? `removed ${r.p}` : 'no startup entry was installed'}`);
   console.log('gateway stopped. Running VS Code / terminals keep their OLD env until restarted.');
 }
@@ -339,7 +431,12 @@ export async function doctor() {
   if (fs.existsSync(PID_PATH) && !st) say(false, 'pid file is stale', `${PID_PATH} exists but the port is silent (process died?)`);
 
   const sp = startupCmdPath();
-  say(fs.existsSync(sp), 'gateway starts at logon', sp);
+  if (IS_WIN) say(fs.existsSync(sp), 'gateway starts at logon', sp);
+  else {
+    const en = systemctl('is-enabled', UNIT_NAME);
+    say(fs.existsSync(sp) && en.out === 'enabled', 'gateway starts at login (systemd --user unit enabled)',
+      `${sp}: ${en.out || 'not installed'}`);
+  }
 
   // Informational, not a fault: the CLI process invoking doctor legitimately may not carry the vars.
   console.log(`info: this process ${process.env.ANTHROPIC_BASE_URL ? `sees ANTHROPIC_BASE_URL=${process.env.ANTHROPIC_BASE_URL}` : 'has no ANTHROPIC_BASE_URL (a shell opened after activating will)'}`);

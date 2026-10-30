@@ -2,7 +2,7 @@
   "name": "claude-gw-status",
   "displayName": "claude-gw status",
   "description": "claude-gw: every Claude account in the pool on the status bar - serving one checked, what is left of each window, when a blocked one reopens, and day/week/month/all-time API-equivalent cost in one line.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "local",
   "engines": {
     "vscode": "^1.80.0"

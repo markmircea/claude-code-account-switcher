@@ -11,7 +11,10 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 
-const DIR = path.join(process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Local'), 'claude-gw');
+// Must match DATA_DIR in src/config.mjs: %LOCALAPPDATA%\claude-gw on Windows, ~/.local/share/claude-gw elsewhere.
+const DIR = path.join(process.env.LOCALAPPDATA || (process.platform === 'win32'
+  ? path.join(process.env.USERPROFILE || '', 'AppData', 'Local')
+  : path.join(process.env.HOME || '', '.local', 'share')), 'claude-gw');
 const STATE_PATH = path.join(DIR, 'accounts_state.json');
 const CONFIG_PATH = path.join(DIR, 'config.json');
 const STATUS_PATH = path.join(DIR, 'status.json');

@@ -1,4 +1,4 @@
-// Windows notification when the gateway moves a conversation to another account, or when the pool
+// Desktop notification (Windows popup, Linux notify-send) when the gateway moves a conversation to another account, or when the pool
 // reopens. No external program, no install, no module: one short-lived powershell.exe.
 //
 // Order matters and was learned by being wrong. The WinRT toast path reports exit code 0 when
@@ -99,8 +99,23 @@ function runPowerShell(script) {
   });
 }
 
+// Linux: libnotify's notify-send, which reaches the desktop's notification daemon over the session
+// D-Bus. A systemd --user unit inherits DBUS_SESSION_BUS_ADDRESS, so this works from the service too.
+// Title and body are separate argv entries with no shell in between, so nothing needs escaping. With
+// no desktop session (SSH only) there is no daemon to talk to: that is reported, never thrown.
+function notifySend(title, body) {
+  return new Promise((resolve) => {
+    const child = spawn('notify-send', ['--app-name=claude-gw', `--expire-time=${POPUP_MS}`, String(title), String(body)],
+      { stdio: 'ignore' });
+    child.on('error', () => resolve('unavailable (notify-send missing)'));
+    child.on('exit', (code) => resolve(code === 0 ? 'notify-send' : 'unavailable (no desktop session?)'));
+    setTimeout(() => { try { child.kill(); } catch { /* gone */ } resolve('unavailable (timed out)'); }, 15000);
+  });
+}
+
 export async function notify(title, body = '') {
   if (process.env.CLAUDE_GW_NO_NOTIFY) return 'disabled'; // tests: no popups on the user's screen
+  if (process.platform !== 'win32') return notifySend(title, body);
   if (await runPowerShell(popupScript(title, body, POPUP_MS))) return 'popup';
   if (await runPowerShell(toastScript(title, body))) return 'toast'; // note: "ran", not "seen"
   await runPowerShell(balloonScript(title, body));
