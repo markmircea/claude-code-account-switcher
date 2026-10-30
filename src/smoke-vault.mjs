@@ -3,12 +3,13 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, saveConfig, STATUS_PATH } from './config.mjs';
 import { vaultPut, vaultGet, vaultLs, vaultRm, vaultPath } from './vault.mjs';
 
 let fail = 0;
 const ok = (n, c, d = '') => { console.log(`${c ? 'PASS' : 'FAIL'}  ${n}${d ? `  - ${d}` : ''}`); if (!c) fail++; };
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const HERE = path.dirname(fileURLToPath(import.meta.url));   // not URL.pathname: a space would arrive as %20
 
 // ---- vault ----
 const CANARY = 'sk-ant-oat01-dpapi-roundtrip-canary-value-0123456789';

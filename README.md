@@ -68,21 +68,33 @@ the others.
 **Windows** (PowerShell)
 
 ```powershell
-git clone https://github.com/markmircea/claude-code-account-switcher.git
-cd claude-code-account-switcher
-npm install -g .
+npm install -g claude-code-account-switcher
 ```
 
 **Linux**
 
 ```bash
+npm install -g --prefix ~/.local claude-code-account-switcher   # `cla-gw` in ~/.local/bin, no sudo
+```
+
+**To update later**, run the same command with `claude-code-account-switcher@latest`, then restart the gateway:
+`cla-gw stop && cla-gw start`.
+
+<details>
+<summary><b>Or install from source</b> (to read or change the code)</summary>
+
+```bash
 git clone https://github.com/markmircea/claude-code-account-switcher.git
 cd claude-code-account-switcher
-npm install -g --prefix ~/.local --install-links=false .   # `cla-gw` in ~/.local/bin, no sudo
+npm install -g .                                               # Windows
+npm install -g --prefix ~/.local --install-links=false .       # Linux
 ```
 
 Keep the folder: the `cla-gw` command links to it, so after a `git pull` (or your own edits) a restart is all it
-takes: `cla-gw stop && cla-gw start`. Check everything works with `npm test` (offline, a few seconds).
+takes: `cla-gw stop && cla-gw start`. Check everything works with `npm test` (offline, under a minute). On Linux,
+`--install-links=false` matters: Ubuntu's npm 9 otherwise copies the folder, and your edits never reach the gateway.
+
+</details>
 
 ### 2. Add your other accounts
 
@@ -170,11 +182,11 @@ chats waiting for an account to reopen · a red **claude-gw DOWN** if the gatewa
 table and the API-equivalent cost for the last day, week, month and all time; click to run `cla-gw health`.
 
 ```bash
-python vscode/pack.py                                          # builds vscode/claude-gw-status-0.3.1.vsix
-code --install-extension vscode/claude-gw-status-0.3.1.vsix --force
+cla-gw install-extension     # builds the extension and installs it with VS Code's `code` command
 ```
 
-then **Developer: Reload Window**.
+then **Developer: Reload Window**. If `code` isn't on your PATH, `cla-gw install-extension --print` gives you the
+file and the command to run by hand.
 
 **Terminal status line.** Run `cla-gw statusline` and paste the printed block into `~/.claude/settings.json`:
 
@@ -395,13 +407,14 @@ that actually served you.
 ## Tests
 
 ```bash
-npm test
+npm test     # from a source checkout
 ```
 
-runs eight offline suites (223 checks) that never touch a running gateway or your accounts: account selection and
+runs ten offline suites (261 checks) that never touch a running gateway or your accounts: account selection and
 the three kinds of `429`, the routing rules, sticky routing end to end against a fake Anthropic server, the reset-time
 rewrite and both holds, token capture from real responses and pricing, what the status bar renders, safe config
-writes, and `/switch`.
+writes, `/switch`, the VS Code extension build, and the npm package itself (packed, installed into a scratch folder
+whose path has a space in it, and run from there).
 
 <details>
 <summary><b>The other test and probe scripts</b></summary>

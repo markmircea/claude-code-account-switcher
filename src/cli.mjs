@@ -6,9 +6,11 @@
 // Naming (PLAN.md phase 5): start|stop act on the gateway itself;
 // enable|disable act on an account's rotation membership. Never overloaded.
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import process from 'node:process';
 import { ensureConfig, loadConfig, saveConfig, pool, availability, poolReopening, HOME, PID_PATH, CONFIG_PATH, LOG_PATH, STATUS_PATH, ACCOUNT_STATE_PATH, readAccountState } from './config.mjs';
 import { resolveBearer, describeIdentity } from './creds.mjs';
@@ -17,9 +19,10 @@ import { vaultLs, vaultRm } from './vault.mjs';
 import { activate, deactivate, doctor, runWithoutGateway, serviceInstalled, systemctl, UNIT_NAME } from './activate.mjs';
 import { preflightAccount } from './preflight.mjs';
 import { auditRouting } from './audit_routing.mjs';
+import { buildVsix } from './vsix.mjs';
 import { priceFor, familyOf, PRICES, PRICES_AS_OF, ratesInPlay, WEB_SEARCH_USD_PER_REQUEST, classifyCostRows } from './config.mjs';
 
-const HERE = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+const HERE = path.dirname(fileURLToPath(import.meta.url));   // not URL.pathname: a space would arrive as %20
 const argv = process.argv.slice(2);
 const cmd = argv[0] || 'status';
 
@@ -431,6 +434,29 @@ pool: ${cfg.accounts.map((a) => a.label).join(', ')}`); process.exitCode = 2; re
       return;
     }
 
+    case 'install-extension': {
+      // The status bar extension, built and installed from here: an npm install has no Python and the
+      // vscode/ folder is buried in node_modules, so the .vsix has to be one command away.
+      const file = buildVsix(path.join(os.tmpdir(), 'claude-gw-vsix'));
+      if (argv.includes('--print')) {
+        console.log(file);
+        console.log(`code --install-extension "${file}" --force`);
+        return;
+      }
+      // Windows needs the whole command as one quoted string (and shell: true) or "code" is not found.
+      const res = process.platform === 'win32'
+        ? spawnSync(`code --install-extension "${file}" --force`, { stdio: 'inherit', shell: true })
+        : spawnSync('code', ['--install-extension', file, '--force'], { stdio: 'inherit' });
+      if (res.error || res.status !== 0) {
+        console.log('VS Code\'s "code" command was not found or failed. Install the file by hand:');
+        console.log(`  code --install-extension "${file}" --force`);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`installed the claude-gw status bar (${path.basename(file)}). Reload VS Code windows to show it.`);
+      return;
+    }
+
     case 'statusline': {
       const self = path.join(HERE, 'statusline.mjs').replace(/\\/g, '/');
       console.log('# Add to ~/.claude/settings.json (top-level key). I have not edited that file for you.');
@@ -637,7 +663,7 @@ Re-run with --yes if you really mean deletion.`);
 
     default:
       console.log('usage: cla-gw start | stop | status | health | check [labels] | doctor | activate [--legacy|--no-startup] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
-      console.log('       switch [label|number|next|off]  (manual account choice: no args = the pool + what to type); install-slash [name]  (put /switch into Claude Code)');
+      console.log('       switch [label|number|next|off]  (manual account choice: no args = the pool + what to type); install-slash [name]  (put /switch into Claude Code); install-extension [--print]  (the VS Code status bar)');
       console.log('       use <label>|none | enable <label> | disable <label> | email <label> <addr> | check [labels] | cost [--days N] | prices | env | clear-env | statusline');
   }
 }

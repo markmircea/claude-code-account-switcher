@@ -1,0 +1,6 @@
+# LF everywhere, whatever core.autocrlf says: npm publishes files exactly as they sit on disk, and a CRLF shebang
+# ("node\r") breaks `cla-gw` on Linux.
+* text=auto eol=lf
+*.png binary
+*.gif binary
+*.vsix binary
