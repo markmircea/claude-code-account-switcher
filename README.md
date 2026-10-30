@@ -2,7 +2,8 @@
 
 # Claude Code Account Switcher
 
-**Auto-switch between your Claude accounts when one hits its usage limit, and keep the chat going.**
+**Auto-switch between your Claude accounts when one hits its usage limit.<br>
+When they are all full, auto-continue the chat the moment the first limit expires (terminal).**
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-informational)
@@ -14,7 +15,8 @@
 Claude Code stops when your plan hits its 5-hour or weekly limit. If you have more than one Claude account, this
 tool keeps all of them ready: a small gateway on your own machine sends each request through the account that
 still has room, and moves to the next one the moment a limit is hit. You keep working; the chat never sees the
-wall.
+wall. And if every account is full, a terminal chat waits and **continues by itself as soon as the first account's
+limit expires**, with nobody typing "continue".
 
 It works with the **Claude Code CLI and the VS Code extension**, without modifying Claude Code: it uses Claude
 Code's documented `ANTHROPIC_BASE_URL` setting to point it at `http://127.0.0.1:8790`.
@@ -24,7 +26,7 @@ Code's documented `ANTHROPIC_BASE_URL` setting to point it at `http://127.0.0.1:
 | | |
 |---|---|
 | 🔄 **Auto-switch** | When the account in use fills a 5-hour or weekly window, the request is re-sent on another account *before any reply has streamed*, so even the request that hit the limit gets answered. |
-| ▶️ **Auto-continue** | When every account is full, Claude Code's own *"continuing automatically at …"* is set to the moment the **first** account reopens. In the VS Code panel, which never auto-continues, the gateway holds the reply open for up to 10 minutes instead. |
+| ▶️ **Auto-continue when a limit expires** *(terminal)* | When every account is full, the terminal chat shows *"continuing automatically at …"*, waits, and carries on by itself at the moment the **first** account's limit expires, not when the account it happened to be on does. The VS Code panel cannot auto-continue; there the gateway holds the reply open for up to 10 minutes instead. |
 | 🧠 **Knows its limits** | Tells a full window apart from a limit on one model or a passing error, so a healthy account is never parked for days by mistake. Stays on one account until it is actually blocked, which keeps the prompt cache warm. |
 | 👀 **Always visible** | A VS Code status-bar item showing every account, a terminal status line, desktop notifications when it switches, and `cla-gw health`. |
 | 🎛️ **Manual override** | `/switch` inside Claude Code (or `cla-gw switch`) to pick the account yourself. |
@@ -71,11 +73,11 @@ npm install -g .
 ```bash
 git clone https://github.com/markmircea/claude-code-account-switcher.git
 cd claude-code-account-switcher
-npm install -g --prefix ~/.local .     # puts `cla-gw` in ~/.local/bin, no sudo
+npm install -g --prefix ~/.local --install-links=false .   # `cla-gw` in ~/.local/bin, no sudo
 ```
 
-Keep the folder: the `cla-gw` command links to it. Check everything works with `npm test` (offline, a few
-seconds).
+Keep the folder: the `cla-gw` command links to it, so after a `git pull` (or your own edits) a restart is all it
+takes: `cla-gw stop && cla-gw start`. Check everything works with `npm test` (offline, a few seconds).
 
 ### 2. Add your other accounts
 
@@ -220,18 +222,19 @@ before the model sees anything, and the model cannot trigger it on its own.
 
 </details>
 
-## How auto-continue works
+## How auto-continue works (when a limit expires)
 
 **In the terminal.** When Claude Code hits a limit it shows *"Usage limit reached · continuing automatically at
-…"*, waits, then sends the next message by itself. The gateway's job is to make that time describe **all** your
+…"*, waits until the limit expires, then sends the next message by itself. The gateway's job is to make that time describe **all** your
 accounts: it rewrites only the reset time in the limit message to the earliest reopening across the pool, and never
 makes a wait longer than Anthropic said.
 
 **Short waits are skipped.** If an account reopens within 45 seconds, the request is simply held and then
 answered.
 
-**In the VS Code panel.** The panel runs Claude Code in a mode that does *not* auto-continue after a limit. So for
-the panel the gateway answers at once, keeps the connection alive, and streams the real reply in when an account
+**In the VS Code panel.** The panel runs Claude Code in a mode that does *not* auto-continue after a limit, so
+for long waits (an hour, overnight) use a terminal chat. For short waits the gateway helps the panel anyway: it
+answers at once, keeps the connection alive, and streams the real reply in when an account
 reopens, up to 10 minutes later. The 10-minute ceiling is deliberate: Claude Code abandons a held reply at about 15
 minutes, and past the ceiling the gateway passes the limit through straight away so a terminal chat can still set
 its own timer.
