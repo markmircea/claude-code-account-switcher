@@ -1,6 +1,6 @@
 <div align="center">
 
-# Claude Code Account Switcher
+# Claude Code Account Switcher and Auto continue on time expiery
 
 **Auto-switch between your Claude accounts when one hits its usage limit.<br>
 When they are all full, auto-continue the chat the moment the first limit expires (terminal).**
