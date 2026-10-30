@@ -21,6 +21,11 @@ limit expires**, with nobody typing "continue".
 It works with the **Claude Code CLI and the VS Code extension**, without modifying Claude Code: it uses Claude
 Code's documented `ANTHROPIC_BASE_URL` setting to point it at `http://127.0.0.1:8790`.
 
+<p align="center">
+  <img src="docs/demo.gif" width="860" alt="Replay of real gateway log lines. 22 October: account D hits its limit and the same request is re-sent on B; B hits its limit and it is re-sent on C; then all three are full and the status line says D opens at 01:00. 21 October: all three full, Claude Code is told the limit resets at 2:20 pm, nobody types for three hours, and at 14:21 the terminal chat carries on by itself on B.">
+  <br><sub>Replayed from a real gateway log (21 and 22 October 2026). The status line is the tool's own.</sub>
+</p>
+
 ## What you get
 
 | | |
