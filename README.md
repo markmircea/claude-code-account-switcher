@@ -5,6 +5,7 @@
 **Auto-switch between your Claude accounts when one hits its usage limit.<br>
 When they are all full, auto-continue the chat the moment the first limit expires (terminal).**
 
+[![npm](https://img.shields.io/npm/v/claude-code-account-switcher)](https://www.npmjs.com/package/claude-code-account-switcher)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-informational)
 ![Node](https://img.shields.io/badge/node-%E2%89%A5%2020-green)
