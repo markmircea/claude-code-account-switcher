@@ -27,6 +27,15 @@ Code's documented `ANTHROPIC_BASE_URL` setting to point it at `http://127.0.0.1:
   <br><sub>Replayed from a real gateway log (21 and 22 October 2026). The status line is the tool's own.</sub>
 </p>
 
+**Install** (Node.js 20+, no admin or sudo needed):
+
+```bash
+npm install -g claude-code-account-switcher                     # Windows
+npm install -g --prefix ~/.local claude-code-account-switcher   # Linux
+```
+
+Then add your other accounts and turn it on: three short steps in the [Quick start](#quick-start).
+
 ## What you get
 
 | | |
@@ -61,25 +70,31 @@ account is from your own traffic, without polling anything.
 
 ## Quick start
 
-You need **Node.js 20+** and **Claude Code**, signed in. Account `A` is the login Claude Code already has; you add
-the others.
+You need **Node.js 20+** (it comes with npm; check with `node -v`) and **Claude Code**, signed in. Account `A` is
+the login Claude Code already has; you add the others.
 
 ### 1. Install
 
-**Windows** (PowerShell)
+**Windows** (PowerShell, no admin needed)
 
 ```powershell
 npm install -g claude-code-account-switcher
 ```
 
-**Linux**
+**Linux** (no sudo)
 
 ```bash
-npm install -g --prefix ~/.local claude-code-account-switcher   # `cla-gw` in ~/.local/bin, no sudo
+npm install -g --prefix ~/.local claude-code-account-switcher   # puts `cla-gw` in ~/.local/bin
 ```
 
-**To update later**, run the same command with `claude-code-account-switcher@latest`, then restart the gateway:
-`cla-gw stop && cla-gw start`.
+**Check it worked:** run `cla-gw`. A new install answers `gateway: NOT RUNNING`; you start it in step 2.
+
+> **Linux: `cla-gw: command not found`?** `~/.local/bin` isn't on your PATH yet. Ubuntu adds it at login once the
+> folder exists, so log out and back in, or run `export PATH="$HOME/.local/bin:$PATH"` (put that line in
+> `~/.bashrc` to keep it).
+
+Install it globally (`-g`), not with `npx`: the gateway runs in the background and starts at login, so it needs a
+permanent home.
 
 <details>
 <summary><b>Or install from source</b> (to read or change the code)</summary>
@@ -122,7 +137,34 @@ Then restart Claude Code so it picks up the change:
 - **Windows:** quit VS Code completely and start it again, and open a new terminal.
 - **Linux:** run **Developer: Reload Window** in VS Code, and start a new `claude` in the terminal.
 
+**Using VS Code?** `cla-gw install-extension` adds a status bar showing every account (see
+[What you'll see](#what-youll-see)). **Want `/switch` inside Claude Code?** Run `cla-gw install-slash`.
+
 **To turn it off:** `cla-gw deactivate` puts everything back the way it was.
+
+### Update or uninstall
+
+**Update** to the latest version, then restart the gateway so it runs the new code:
+
+```bash
+npm install -g claude-code-account-switcher@latest                    # Windows
+npm install -g --prefix ~/.local claude-code-account-switcher@latest  # Linux
+cla-gw stop && cla-gw start
+```
+
+If you switch Node versions (for example with nvm), install it again under the new one and run `cla-gw activate`, so
+the autostart points at the new Node.
+
+**Uninstall:**
+
+```bash
+cla-gw deactivate                                    # stop it, remove the autostart, point Claude Code back at Anthropic
+npm uninstall -g claude-code-account-switcher        # Linux: add --prefix ~/.local
+```
+
+Your account tokens and settings stay behind in `%LOCALAPPDATA%\claude-gw` (Windows) or `~/.local/share/claude-gw`
+(Linux): delete that folder to remove them too. The status bar goes with
+`code --uninstall-extension local.claude-gw-status`, and `/switch` by deleting `~/.claude/commands/switch.md`.
 
 ## Everyday commands
 
@@ -153,6 +195,7 @@ Then restart Claude Code so it picks up the change:
 | `switch [label\|number\|next\|off]` | Pick the serving account by hand; `off` hands control back to the automatic rules |
 | `use <label>\|none` | Pin an account (`none` = automatic) |
 | `install-slash [name]` | Add the `/switch` command to Claude Code (never overwrites a different file) |
+| `install-extension [--print]` | Build the VS Code status bar extension and install it with `code`; `--print` gives the file and command instead |
 | `activate [--no-startup\|--legacy]` | Point Claude Code at the gateway and install the autostart |
 | `deactivate` | Undo `activate` and stop the gateway |
 | `doctor` | Check the environment, Claude Code settings, login, gateway and autostart; exit code 1 on a problem |
