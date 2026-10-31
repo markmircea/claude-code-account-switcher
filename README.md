@@ -454,10 +454,10 @@ that actually served you.
 npm test     # from a source checkout
 ```
 
-runs ten offline suites (261 checks) that never touch a running gateway or your accounts: account selection and
+runs eleven offline suites (268 checks) that never touch a running gateway or your accounts: account selection and
 the three kinds of `429`, the routing rules, sticky routing end to end against a fake Anthropic server, the reset-time
 rewrite and both holds, token capture from real responses and pricing, what the status bar renders, safe config
-writes, `/switch`, the VS Code extension build, and the npm package itself (packed, installed into a scratch folder
+writes, `/switch`, a port held by another program, the VS Code extension build, and the npm package itself (packed, installed into a scratch folder
 whose path has a space in it, and run from there).
 
 <details>

@@ -1,6 +1,6 @@
 {
   "name": "claude-code-account-switcher",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "type": "module",
   "description": "Auto-switch Claude Code between your Claude accounts when one hits its usage limit, and auto-continue the chat when the limit expires (terminal). Windows and Linux, zero dependencies.",
   "keywords": ["claude", "claude-code", "anthropic", "account-switcher", "usage-limit", "rate-limit", "auto-continue", "failover", "proxy", "gateway", "claude-max", "claude-pro", "cli"],
@@ -13,7 +13,7 @@
   "scripts": {
     "start": "node src/cli.mjs start",
     "status": "node src/cli.mjs status",
-    "test": "node src/test_selection.mjs && node src/test_routing_rules.mjs && node src/test_costing.mjs && node src/test_config_safety.mjs && node src/test_quota_surface.mjs && node src/test_statusbar.mjs && node src/test_sticky.mjs && node src/test_switch_cli.mjs && node src/test_vsix.mjs && node src/test_package.mjs",
+    "test": "node src/test_selection.mjs && node src/test_routing_rules.mjs && node src/test_costing.mjs && node src/test_config_safety.mjs && node src/test_quota_surface.mjs && node src/test_statusbar.mjs && node src/test_sticky.mjs && node src/test_switch_cli.mjs && node src/test_vsix.mjs && node src/test_package.mjs && node src/test_port_conflict.mjs",
     "smoke": "node src/smoke.mjs"
   },
   "engines": { "node": ">=20" }

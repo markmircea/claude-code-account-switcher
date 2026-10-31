@@ -78,14 +78,30 @@ function accountsTable(cfg) {
   }).filter(Boolean).join('\n') + (orgWarning(cfg) ? `\n\n  ${orgWarning(cfg)}` : '');
 }
 
-async function getStatus(cfg) {
+// { status, st }: st is set only when THIS gateway answered. null = nothing answers on the port at all.
+async function statusReply(cfg) {
   try {
     const r = await fetch(`http://${cfg.host}:${cfg.port}/__gw/status`, {
       headers: { authorization: `Bearer ${cfg.secret}` },
       signal: AbortSignal.timeout(4000),
     });
-    return await r.json();
+    let body = null;
+    try { body = await r.json(); } catch { }
+    return { status: r.status, st: r.ok && Array.isArray(body?.pool) ? body : null };
   } catch (e) { return null; }
+}
+
+async function getStatus(cfg) {
+  return (await statusReply(cfg))?.st || null;
+}
+
+// Something holds the port but is not this gateway: another program, or a claude-gw started with a different
+// config.json (its secret no longer matches). Seen 10-31: a 401 page was taken for our status and crashed `status`.
+async function foreignPortHolder(cfg) {
+  const r = await statusReply(cfg);
+  if (!r || r.st) return null;
+  return `something else answers on ${cfg.host}:${cfg.port} (HTTP ${r.status}): another program, or a claude-gw ` +
+    `started with a different config.json. Stop it, or change "port" in ${CONFIG_PATH} and run cla-gw activate again.`;
 }
 
 async function main() {
@@ -94,6 +110,8 @@ async function main() {
 
   switch (cmd) {
     case 'start': {
+      const foreign = await foreignPortHolder(cfg);
+      if (foreign) { console.log(`not started: ${foreign}`); process.exitCode = 1; return; }
       if (serviceInstalled()) {
         // Linux with the systemd unit: systemd owns the process, and restarts it if it crashes.
         if (await getStatus(cfg) && !systemctl('is-active', UNIT_NAME).ok) {
@@ -139,7 +157,7 @@ async function main() {
 
     case 'status': {
       const st = await getStatus(cfg);
-      if (!st) { console.log('gateway: NOT RUNNING'); console.log(`config pool: ${pool(cfg).map((a) => a.label).join(', ') || '(empty)'}`); console.log(`config upstream: ${cfg.upstream}${/127\.0\.0\.1|localhost/.test(cfg.upstream) ? '   <-- LOOPBACK: tests only; real traffic would 502. Fix: node src/reset_upstream.mjs' : ''}`); return; }
+      if (!st) { const foreign = await foreignPortHolder(cfg); console.log(foreign ? `gateway: NOT RUNNING - but ${foreign}` : 'gateway: NOT RUNNING'); console.log(`config pool: ${pool(cfg).map((a) => a.label).join(', ') || '(empty)'}`); console.log(`config upstream: ${cfg.upstream}${/127\.0\.0\.1|localhost/.test(cfg.upstream) ? '   <-- LOOPBACK: tests only; real traffic would 502. Fix: node src/reset_upstream.mjs' : ''}`); return; }
       console.log(`gateway: RUNNING on ${cfg.host}:${cfg.port} (uptime ${(st.uptimeMs / 1000).toFixed(0)}s)`);
       // `pin` is what the user forced; `would serve next` is what selection currently picks. Showing
       // only the latter once read as "the pin is B" when there was no pin at all.
