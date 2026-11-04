@@ -1,6 +1,7 @@
 // Claude Code `statusLine` command. Prints which gateway account is serving THIS conversation.
 //
-// Add to ~/.claude/settings.json (prints ready-to-paste JSON: node src/cli.mjs statusline):
+// `cla-gw activate` adds it to ~/.claude/settings.json when there is no status line yet; by hand
+// (prints ready-to-paste JSON: node src/cli.mjs statusline):
 //   "statusLine": { "type": "command", "command": "node <repo>/src/statusline.mjs" }
 //
 // Claude Code pipes a JSON object on stdin; we use session_id to look up the account the gateway

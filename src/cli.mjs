@@ -16,7 +16,7 @@ import { ensureConfig, loadConfig, saveConfig, pool, availability, poolReopening
 import { resolveBearer, describeIdentity } from './creds.mjs';
 import { addAccount } from './add.mjs';
 import { vaultLs, vaultRm } from './vault.mjs';
-import { activate, deactivate, doctor, runWithoutGateway, serviceInstalled, systemctl, UNIT_NAME } from './activate.mjs';
+import { activate, deactivate, doctor, runWithoutGateway, serviceInstalled, statusLineWanted, systemctl, UNIT_NAME } from './activate.mjs';
 import { preflightAccount } from './preflight.mjs';
 import { auditRouting } from './audit_routing.mjs';
 import { buildVsix } from './vsix.mjs';
@@ -188,7 +188,11 @@ async function main() {
     }
 
     case 'activate': {
-      await activate({ noStartup: process.argv.includes('--no-startup'), legacy: process.argv.includes('--legacy') });
+      await activate({
+        noStartup: process.argv.includes('--no-startup'),
+        noStatusLine: process.argv.includes('--no-statusline'),
+        legacy: process.argv.includes('--legacy'),
+      });
       return;
     }
 
@@ -476,10 +480,10 @@ pool: ${cfg.accounts.map((a) => a.label).join(', ')}`); process.exitCode = 2; re
     }
 
     case 'statusline': {
-      const self = path.join(HERE, 'statusline.mjs').replace(/\\/g, '/');
-      console.log('# Add to ~/.claude/settings.json (top-level key). I have not edited that file for you.');
+      console.log('# `cla-gw activate` adds this to ~/.claude/settings.json unless you already have a status line;');
+      console.log('# to use this one instead, put it there yourself (top-level key).');
       console.log('# Shows which gateway account is serving THIS conversation (F22/D-7).');
-      console.log(JSON.stringify({ statusLine: { type: 'command', command: `node "${self}"` } }, null, 2));
+      console.log(JSON.stringify({ statusLine: statusLineWanted() }, null, 2));
       return;
     }
 
@@ -680,7 +684,7 @@ Re-run with --yes if you really mean deletion.`);
     }
 
     default:
-      console.log('usage: cla-gw start | stop | status | health | check [labels] | doctor | activate [--legacy|--no-startup] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
+      console.log('usage: cla-gw start | stop | status | health | check [labels] | doctor | activate [--legacy|--no-startup|--no-statusline] | deactivate | reset-state | notify | ls | add <label> [--paste|--auto] | forget <label> --yes |');
       console.log('       switch [label|number|next|off]  (manual account choice: no args = the pool + what to type); install-slash [name]  (put /switch into Claude Code); install-extension [--print]  (the VS Code status bar)');
       console.log('       use <label>|none | enable <label> | disable <label> | email <label> <addr> | check [labels] | cost [--days N] | prices | env | clear-env | statusline');
   }

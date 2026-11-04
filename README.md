@@ -196,12 +196,12 @@ Your account tokens and settings stay behind in `%LOCALAPPDATA%\claude-gw` (Wind
 | `use <label>\|none` | Pin an account (`none` = automatic) |
 | `install-slash [name]` | Add the `/switch` command to Claude Code (never overwrites a different file) |
 | `install-extension [--print]` | Build the VS Code status bar extension and install it with `code`; `--print` gives the file and command instead |
-| `activate [--no-startup\|--legacy]` | Point Claude Code at the gateway and install the autostart |
+| `activate [--no-startup\|--no-statusline\|--legacy]` | Point Claude Code at the gateway, add the terminal status line and install the autostart |
 | `deactivate` | Undo `activate` and stop the gateway |
 | `doctor` | Check the environment, Claude Code settings, login, gateway and autostart; exit code 1 on a problem |
 | `run -- <claude args>` | One Claude session that bypasses the gateway |
 | `env` / `clear-env` | Print the lines that point (or stop pointing) the current shell at the gateway |
-| `statusline` | Print the status-line snippet for `~/.claude/settings.json` |
+| `statusline` | Print the status-line snippet for `~/.claude/settings.json` (`activate` adds it unless you have your own) |
 | `cost [--days N]` / `prices` | API-equivalent cost per model, day and account / the price table behind it |
 | `audit routing [--hours N]` | Check the real traffic log against the routing rules; exit code 1 on a violation |
 | `reset-state` | Forget learned usage data (the gateway picks this up without a restart) |
@@ -232,7 +232,8 @@ cla-gw install-extension     # builds the extension and installs it with VS Code
 then **Developer: Reload Window**. If `code` isn't on your PATH, `cla-gw install-extension --print` gives you the
 file and the command to run by hand.
 
-**Terminal status line.** Run `cla-gw statusline` and paste the printed block into `~/.claude/settings.json`:
+**Terminal status line.** `cla-gw activate` adds it to `~/.claude/settings.json` for you, on Windows and Linux. If you
+already have a status line of your own it is left alone; `cla-gw statusline` prints the block to paste by hand:
 
 ```
 gw→C 5h 51% 7d 87% [B,C,D]
@@ -383,7 +384,7 @@ Paths are shown for Windows; on Linux the data folder is `~/.local/share/claude-
 | `<data>/gateway.pid` | The running gateway's process id |
 | `~/.claude/.credentials.json` | Account `A`, your Claude Code login. **Read only** |
 | `~/.claude.json` | Read only, to show which account Claude Code is signed in as |
-| `~/.claude/settings.json` | `activate` adds three `env` keys (backup: `settings.json.claude-gw.bak`); `deactivate` removes them |
+| `~/.claude/settings.json` | `activate` adds three `env` keys and the `statusLine` if you have none (backup: `settings.json.claude-gw.bak`); `deactivate` removes them, never a status line of your own |
 | `~/.claude/commands/switch.md` | Written by `install-slash` only |
 | Windows: user environment variables | `CLAUDE_CODE_USE_GATEWAY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS` |
 | Windows: Startup folder `claude-gw.cmd` | Autostart (`activate --no-startup` skips it) |

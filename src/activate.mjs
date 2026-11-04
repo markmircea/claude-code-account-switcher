@@ -128,9 +128,29 @@ function settingsEnvWanted(cfg, legacy = false) {
   };
 }
 
-// Touches only those three keys. Backs the file up once, and refuses rather than trashing a settings
-// file that does not parse.
-function applySettingsEnv(cfg, legacy = false) {
+// The terminal status line (src/statusline.mjs) is the only thing in a terminal chat that shows which
+// account is serving it; the VS Code panel has the extension instead. It lives in the same settings.json,
+// so activate adds it too - but only into an empty slot: a status line of the user's own is never replaced.
+export function statusLineWanted() {
+  return { type: 'command', command: `node "${path.join(HERE, 'statusline.mjs').replace(/\\/g, '/')}"` };
+}
+
+// Ours = the exact shape `cla-gw statusline` prints, from this copy or an older one (a moved checkout, the
+// old linked install). Anything else belongs to the user.
+function isOurStatusLine(sl) {
+  return !!sl && sl.type === 'command' && /^node "[^"]*\/src\/statusline\.mjs"$/.test(sl.command || '');
+}
+
+// none | current | stale (ours, but pointing at another copy) | theirs
+function statusLineState(sl) {
+  if (!sl) return 'none';
+  if (!isOurStatusLine(sl)) return 'theirs';
+  return sl.command === statusLineWanted().command ? 'current' : 'stale';
+}
+
+// Touches only those three keys and our own statusLine. Backs the file up once, and refuses rather than
+// trashing a settings file that does not parse.
+export function applySettingsEnv(cfg, legacy = false, { statusLine = true } = {}) {
   const file = settingsPath();
   const wanted = settingsEnvWanted(cfg, legacy);
   let doc = {};
@@ -145,12 +165,29 @@ function applySettingsEnv(cfg, legacy = false) {
   for (const k of SETTINGS_ENV_KEYS) {
     if (doc.env[k] !== wanted[k]) { changed.push(k); doc.env[k] = wanted[k]; }
   }
+  const sl = statusLineState(doc.statusLine);
+  if (statusLine && (sl === 'none' || sl === 'stale')) { changed.push('statusLine'); doc.statusLine = statusLineWanted(); }
+  const result = { changed, statusLine: statusLineState(doc.statusLine), settingsPath: file, backup: `${file}.claude-gw.bak` };
   // Do not touch the file when it already agrees. Claude Code watches settings.json, and rewriting it
   // for no reason risks disturbing live sessions (a config change during a usage-limit wait is one of
   // the things that cancels that wait).
-  if (!changed.length) return { changed, settingsPath: file, backup: `${file}.claude-gw.bak` };
+  if (!changed.length) return result;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify(doc, null, 2));
-  return { changed, settingsPath: file, backup: `${file}.claude-gw.bak` };
+  return result;
+}
+
+// deactivate's half: the three env keys, and the statusLine only when it is ours.
+export function removeSettingsEnv() {
+  const file = settingsPath();
+  const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const removed = [];
+  for (const k of SETTINGS_ENV_KEYS) {
+    if (doc.env && k in doc.env) { delete doc.env[k]; removed.push(k); }
+  }
+  if (isOurStatusLine(doc.statusLine)) { delete doc.statusLine; removed.push('statusLine'); }
+  if (removed.length) fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+  return { file, removed };
 }
 
 function settingsEnvState(cfg, legacy = false) {
@@ -160,7 +197,7 @@ function settingsEnvState(cfg, legacy = false) {
     const env = doc.env || {};
     const wanted = settingsEnvWanted(cfg, legacy);
     const bad = SETTINGS_ENV_KEYS.filter((k) => (env[k] ?? '') !== (wanted[k] ?? ''));
-    return { file, present: true, bad };
+    return { file, present: true, bad, statusLine: statusLineState(doc.statusLine) };
   } catch (e) { return { file, present: false, err: e.message }; }
 }
 
@@ -234,7 +271,7 @@ function fmtEpoch(ms) {
 
 // ---------------------------------------------------------------- activate
 
-export async function activate({ noStartup = false, legacy = false } = {}) {
+export async function activate({ noStartup = false, noStatusLine = false, legacy = false } = {}) {
   const cfg = loadConfig();
   const base = `http://${cfg.host}:${cfg.port}`;
   console.log(`config:  ${CONFIG_PATH}`);
@@ -278,8 +315,9 @@ export async function activate({ noStartup = false, legacy = false } = {}) {
 
   // ...and in Claude Code's own env block, which is what lets a long-running VS Code pick the mode up
   // on a Reload Window instead of needing a full quit.
-  const se = applySettingsEnv(cfg, legacy);
-  console.log(`settings: ${se.settingsPath} ${se.changed.length ? `env updated: ${se.changed.join(', ')} (backup: ${se.backup})` : 'env already current'}`);
+  const se = applySettingsEnv(cfg, legacy, { statusLine: !noStatusLine });
+  console.log(`settings: ${se.settingsPath} ${se.changed.length ? `updated: ${se.changed.join(', ')} (backup: ${se.backup})` : 'already current'}`);
+  if (se.statusLine === 'theirs') console.log('statusline: kept your own status line (`cla-gw statusline` prints the gateway one)');
 
   if (!noStartup) console.log(`startup: ${installStartup()}`);
 
@@ -331,14 +369,9 @@ export async function deactivate() {
   // Take the env block out of Claude Code's settings too, otherwise the client keeps being pointed at
   // a port that is about to stop answering.
   try {
-    const file = settingsPath();
-    const doc = JSON.parse(fs.readFileSync(file, 'utf8'));
-    if (doc.env) {
-      for (const k of SETTINGS_ENV_KEYS) delete doc.env[k];
-      fs.writeFileSync(file, JSON.stringify(doc, null, 2));
-      console.log(`settings: gateway keys removed from ${file}`);
-    }
-  } catch (e) { console.log(`settings: could not clean ${settingsPath()} (${e.message}) - remove its ANTHROPIC_* env keys yourself`); }
+    const { file, removed } = removeSettingsEnv();
+    console.log(`settings: ${removed.length ? `removed ${removed.join(', ')} from ${file}` : `nothing of ours in ${file}`}`);
+  } catch (e) { console.log(`settings: could not clean ${settingsPath()} (${e.message}) - remove its ANTHROPIC_* env keys and the claude-gw statusLine yourself`); }
   const r = removeStartup();
   spawnSync(process.execPath, [path.join(HERE, 'cli.mjs'), 'stop'], { stdio: 'ignore' });
   console.log(`env:     ${ALL_VARS.join(', ')} ${IS_WIN ? 'removed from USER scope' : `removed from ${ENV_D_PATH}`}`);
@@ -424,6 +457,15 @@ export async function doctor() {
   say(ses.present && !ses.bad.length, 'gateway keys present in Claude Code settings env',
     ses.present ? (ses.bad.length ? `stale/missing: ${ses.bad.join(', ')} - run: cla-gw activate` : `agree (${ses.file})`)
       : `cannot use ${ses.file} (${ses.err})`);
+  // Not a fault either way: the status line is a display, and a user's own one is left alone on purpose.
+  if (ses.present) {
+    console.log(`info: terminal status line ${{
+      current: 'shows the serving account',
+      stale: 'points at another copy of claude-gw - run: cla-gw activate',
+      theirs: 'is your own (cla-gw statusline prints the gateway one)',
+      none: 'not set - run: cla-gw activate',
+    }[ses.statusLine]}`);
+  }
 
   const st = await gwStatus(cfg);
   const pid = fs.existsSync(PID_PATH) ? fs.readFileSync(PID_PATH, 'utf8').trim() : '?';
